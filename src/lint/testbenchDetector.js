@@ -308,8 +308,52 @@ function stripComments(O) {
   ).replace(/\/\/[^\r\n]*/g, "");
 }
 
+// Finds a module with no ports, looking past `import` clauses and a #(...) parameter list.
+function hasPortlessModule(O) {
+  let pattern = /\bmodule\s+(?:(?:automatic|static)\s+)?[a-zA-Z_]\w*\s*/g;
+  for (let match of O.matchAll(pattern)) {
+    let rest = O.slice(match.index + match[0].length);
+    let imports = rest.match(/^(?:import\s+[^;]*;\s*)*/);
+    let at = imports[0].length;
+    if (rest[at] === "#") {
+      let open = rest.indexOf("(", at);
+      let depth = 0;
+      let close = open < 0 ? -1 : open;
+      for (; close >= 0 && close < rest.length; close++) {
+        if (rest[close] === "(") {
+          depth++;
+        } else if (rest[close] === ")" && --depth === 0) {
+          break;
+        }
+      }
+      if (close < 0 || close >= rest.length) {
+        continue;
+      }
+      at = close + 1;
+    }
+    if (/^\s*(?:;|\(\s*\)\s*;)/.test(rest.slice(at))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// SystemVerilog RTL routinely carries $fatal checks and simulation-only memory models,
+// so behavior alone does not make a testbench: it must also have a testbench's shape.
+function hasTestbenchStructure(O, d) {
+  let fileName = (d ?? "").replace(/\\/g, "/").split("/").pop() ?? "";
+  return (
+    hasPortlessModule(O) ||
+    /\bprogram\b/.test(O) ||
+    /\b(?:always|forever)\s*#/.test(O) ||
+    /(?:^tb_|_tb\.[a-zA-Z0-9]+$|_testbench\.[a-zA-Z0-9]+$|_sim\.[a-zA-Z0-9]+$)/i.test(fileName) ||
+    /\bmodule\s+(?:tb_\w*|\w+_tb|\w+_testbench|\w+_sim)\b/i.test(O)
+  );
+}
+
 export function detectTestbench(O, d, m) {
   let k = m?.threshold ?? 4;
+  let isSystemVerilog = /\.svh?$/i.test(d ?? "");
   let E = stripComments(O);
   let C = [];
   let M = 0;
@@ -339,7 +383,7 @@ export function detectTestbench(O, d, m) {
     v += 3;
     C.push(`waveform dumping task ('${match2[0]}')`);
   }
-  let Q = E.replace(/always\s*@\s*(?:\([^)]*\)|\*)/g, "");
+  let Q = E.replace(isSystemVerilog ? /always(?:_ff|_latch|_comb)?\s*@\s*(?:\([^)]*\)|\*)/g : /always\s*@\s*(?:\([^)]*\)|\*)/g, "");
   if (/@\s*\(\s*(?:posedge|negedge|[a-zA-Z_])/.test(Q)) {
     M += 3;
     v += 3;
@@ -394,7 +438,7 @@ export function detectTestbench(O, d, m) {
     C.push(`module name testbench pattern ('${Oe}')`);
   }
   return {
-    isTestbench: M >= k,
+    isTestbench: M >= k && (!isSystemVerilog || hasTestbenchStructure(E, d)),
     score: M,
     reasons: C,
   };

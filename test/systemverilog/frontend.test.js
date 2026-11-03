@@ -200,8 +200,36 @@ describe("Verilog files stay strict IEEE 1364", () => {
 });
 
 describe("testbench detection", () => {
-  it("recognizes a SystemVerilog testbench", () => {
-    let text = fs.readFileSync(path.join(fixtures, "recognized_only.sv"), "utf8");
-    expect(typeof detectTestbench(text, "recognized_only.sv").isTestbench).toBe("boolean");
+  let rtl = (body) => `module cpu (input logic clk, output logic q);\n${body}\nendmodule\n`;
+  it("always_ff alone is not procedural waiting", () => {
+    let result = detectTestbench(rtl("always_ff @(posedge clk) q <= 1'b1;"), "/x/cpu.sv");
+    expect(result.reasons.join()).not.toContain("procedural event");
+    expect(result.isTestbench).toBe(false);
+  });
+  it("RTL with a simulation-only $fatal stays RTL", () => {
+    let body = "always_ff @(posedge clk) begin q <= 1'b1; if (q) $fatal(1, \"bad\"); end";
+    expect(detectTestbench(rtl(body), "/x/cpu.sv").isTestbench).toBe(false);
+  });
+  it("RTL with $readmemh and #0 stays RTL", () => {
+    let body = "logic m [4]; initial begin #0; $readmemh(\"a.mem\", m); end";
+    expect(detectTestbench(rtl(body), "/x/imem.sv").isTestbench).toBe(false);
+  });
+  it("a parameter list does not hide real ports", () => {
+    let text = "module cpu #(parameter W = (1)) (input logic clk);\ninitial $finish;\nendmodule\n";
+    expect(detectTestbench(text, "/x/cpu.sv").isTestbench).toBe(false);
+  });
+  it("a portless module with simulation code is a testbench", () => {
+    for (let header of ["module top;", "module top();", "module top #(parameter W = 1) ();", "module top import p::*; ;"]) {
+      let text = `${header}\ninitial begin #5 $finish; end\nendmodule\n`;
+      expect(detectTestbench(text, "/x/top.sv").isTestbench).toBe(true);
+    }
+  });
+  it("testbench names count even with ports", () => {
+    let text = "module cpu_tb (input logic clk);\ninitial $finish;\nendmodule\n";
+    expect(detectTestbench(text, "/x/cpu_tb.sv").isTestbench).toBe(true);
+  });
+  it("Verilog files keep the original scoring", () => {
+    let text = "module cpu (input clk);\nalways @(posedge clk) $fatal;\nendmodule\n";
+    expect(detectTestbench(text, "/x/cpu.v").isTestbench).toBe(true);
   });
 });

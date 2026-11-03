@@ -1,0 +1,373 @@
+{
+  "name": "theryx-verilog",
+  "displayName": "Theryx Verilog",
+  "description": "Theryx Verilog (Alpha) \u2014 1-to-1 Structural RTL Schematic Viewer & STARC/RMM Linter for IEEE 1364 Verilog and IEEE 1800 SystemVerilog",
+  "version": "0.2.0-alpha",
+  "icon": "Theryx.png",
+  "author": {
+    "name": "Luigi C. Filho",
+    "company": "LC Desenvolvimentos"
+  },
+  "publisher": "theryx",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/luigicfilho/theryx"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "keywords": [
+    "verilog",
+    "rtl",
+    "schematic",
+    "viewer",
+    "linter",
+    "starc",
+    "rmm",
+    "fpga",
+    "asic",
+    "hardware"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Visualization"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "bundle": "npm run bundle:extension && npm run bundle:worker",
+    "bundle:extension": "esbuild src/extension.js --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify",
+    "bundle:worker": "esbuild src/schematic/layout-worker.js --bundle --outfile=dist/layout-worker.js --format=cjs --platform=node --target=node18 --minify",
+    "bundle:dev": "npm run bundle:extension:dev && npm run bundle:worker:dev",
+    "bundle:extension:dev": "esbuild src/extension.js --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap",
+    "bundle:worker:dev": "esbuild src/schematic/layout-worker.js --bundle --outfile=dist/layout-worker.js --format=cjs --platform=node --target=node18 --sourcemap",
+    "watch": "npm run bundle:extension:dev -- --watch",
+    "build": "npm run bundle",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package"
+  },
+  "activationEvents": [
+    "onLanguage:verilog",
+    "onLanguage:systemverilog"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "verilog",
+        "aliases": [
+          "Verilog",
+          "verilog"
+        ],
+        "extensions": [
+          ".v",
+          ".vh"
+        ],
+        "configuration": "./syntaxes/verilog.configuration.json"
+      },
+      {
+        "id": "systemverilog",
+        "aliases": [
+          "SystemVerilog",
+          "systemverilog"
+        ],
+        "extensions": [
+          ".sv",
+          ".svh"
+        ],
+        "configuration": "./syntaxes/verilog.configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "verilog",
+        "scopeName": "source.verilog",
+        "path": "./syntaxes/verilog.tmLanguage.json"
+      },
+      {
+        "language": "systemverilog",
+        "scopeName": "source.systemverilog",
+        "path": "./syntaxes/systemverilog.tmLanguage.json"
+      }
+    ],
+    "themes": [
+      {
+        "id": "theryx-dark-modern",
+        "label": "Theryx Dark (Modern)",
+        "uiTheme": "vs-dark",
+        "path": "./themes/theryx-dark-theme.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "verilog.showFullModuleSchematic",
+        "title": "Theryx: View Full Module Schematic",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "verilog.showSubcircuitSchematic",
+        "title": "Theryx: Inspect Isolated Subcircuit",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "verilog.showInstanceSchematic",
+        "title": "Theryx: Inspect Submodule Instance Schematic",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "verilog.openModuleFile",
+        "title": "Theryx: Open Submodule Source File",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "theryx.createRulesConfig",
+        "title": "Theryx: Create Rules File (.theryx-rules.json)",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "theryx.selectSemanticTheme",
+        "title": "Theryx: Select Hardware Color Theme (Semantic Highlighting)",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "theryx.resetSemanticTheme",
+        "title": "Theryx: Reset Semantic Theme (Remove Theme Colors)",
+        "category": "Theryx Verilog"
+      },
+      {
+        "command": "theryx.closeSchematic",
+        "title": "Theryx: Close Schematic Panel",
+        "category": "Theryx Verilog"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "clock",
+        "description": "Clock signals (e.g. clk, clk_in)"
+      },
+      {
+        "id": "reset",
+        "description": "Reset signals (e.g. rst_n, rst)"
+      },
+      {
+        "id": "reg",
+        "description": "Registers and state variables (reg)"
+      },
+      {
+        "id": "wire",
+        "description": "Physical connections and nets (wire)"
+      },
+      {
+        "id": "portInput",
+        "description": "Input ports (input)"
+      },
+      {
+        "id": "portOutput",
+        "description": "Output ports (output)"
+      },
+      {
+        "id": "portInout",
+        "description": "Bidirectional ports (inout)"
+      },
+      {
+        "id": "verilogParameter",
+        "description": "Constants and parameters (parameter, localparam)"
+      },
+      {
+        "id": "moduleDef",
+        "description": "Verilog module declaration"
+      },
+      {
+        "id": "moduleInstance",
+        "description": "Submodule instance"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "verilog",
+        "scopes": {
+          "clock": [
+            "keyword.other.clock.verilog",
+            "entity.name.type",
+            "keyword.control"
+          ],
+          "reset": [
+            "keyword.other.reset.verilog",
+            "keyword.control"
+          ],
+          "reg": [
+            "variable.other.reg.verilog",
+            "storage.type"
+          ],
+          "wire": [
+            "variable.other.wire.verilog",
+            "entity.name.variable"
+          ],
+          "portInput": [
+            "variable.parameter.input.verilog",
+            "variable.parameter"
+          ],
+          "portOutput": [
+            "variable.parameter.output.verilog",
+            "support.variable"
+          ],
+          "portInout": [
+            "variable.parameter.inout.verilog",
+            "support.type"
+          ],
+          "verilogParameter": [
+            "variable.other.constant.verilog",
+            "constant.numeric"
+          ],
+          "moduleDef": [
+            "entity.name.type.module.verilog",
+            "entity.name.class"
+          ],
+          "moduleInstance": [
+            "entity.name.function.instance.verilog",
+            "entity.name.function"
+          ]
+        }
+      },
+      {
+        "language": "systemverilog",
+        "scopes": {
+          "clock": [
+            "keyword.other.clock.verilog",
+            "entity.name.type",
+            "keyword.control"
+          ],
+          "reset": [
+            "keyword.other.reset.verilog",
+            "keyword.control"
+          ],
+          "reg": [
+            "variable.other.reg.verilog",
+            "storage.type"
+          ],
+          "wire": [
+            "variable.other.wire.verilog",
+            "entity.name.variable"
+          ],
+          "portInput": [
+            "variable.parameter.input.verilog",
+            "variable.parameter"
+          ],
+          "portOutput": [
+            "variable.parameter.output.verilog",
+            "support.variable"
+          ],
+          "portInout": [
+            "variable.parameter.inout.verilog",
+            "support.type"
+          ],
+          "verilogParameter": [
+            "variable.other.constant.verilog",
+            "constant.numeric"
+          ],
+          "moduleDef": [
+            "entity.name.type.module.verilog",
+            "entity.name.class"
+          ],
+          "moduleInstance": [
+            "entity.name.function.instance.verilog",
+            "entity.name.function"
+          ]
+        }
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "verilog.showFullModuleSchematic",
+          "when": "editorLangId == verilog || editorLangId == systemverilog"
+        },
+        {
+          "command": "verilog.showSubcircuitSchematic",
+          "when": "editorLangId == verilog || editorLangId == systemverilog"
+        },
+        {
+          "command": "verilog.showInstanceSchematic",
+          "when": "editorLangId == verilog || editorLangId == systemverilog"
+        },
+        {
+          "command": "verilog.openModuleFile",
+          "when": "editorLangId == verilog || editorLangId == systemverilog"
+        },
+        {
+          "command": "theryx.closeSchematic",
+          "when": "true"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Theryx Verilog",
+      "properties": {
+        "theryx.lint.rulesPath": {
+          "type": "string",
+          "default": ".theryx-rules.json",
+          "scope": "resource",
+          "markdownDescription": "Path to the STARC/RMM rules configuration file, relative to the workspace root (or absolute). See `.theryx-rules.json` for the schema."
+        },
+        "theryx.lint.ignoreTestbenches": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Automatically detect simulation testbenches and suppress synthesis linting and parser error squiggles while preserving syntax highlighting."
+        },
+        "theryx.semanticTheme": {
+          "type": "string",
+          "enum": [
+            "theryx-dark",
+            "industrial-eda",
+            "high-contrast-pedagogic",
+            "sync-vs-comb"
+          ],
+          "default": "theryx-dark",
+          "scope": "resource",
+          "markdownDescription": "Hardware semantic theme for coloring Clock, Reset, Regs, Wires, and Ports in the editor. Run `Theryx: Select Hardware Color Theme` to preview the options."
+        },
+        "theryx.moduleSearchPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "markdownDescription": "Additional directories searched for module definitions when a submodule is not found next to the referencing file. Relative paths resolve against each workspace folder; workspace folders are always searched."
+        },
+        "theryx.semanticTheme.applyToWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Apply the hardware semantic theme to **workspace** settings. The extension never writes to your personal (global) settings. Set to `false` to disable all settings mutation."
+        }
+      }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": [
+          "**/.theryx-rules.json",
+          "**/starc-rmm-rules.json"
+        ],
+        "url": "./rules/rules.schema.json"
+      },
+      {
+        "fileMatch": [
+          "**/theryx-rules.json"
+        ],
+        "url": "./rules/rules.schema.json"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "elkjs": "0.12.0"
+  }
+}

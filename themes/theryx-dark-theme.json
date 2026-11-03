@@ -1,0 +1,163 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "Theryx Dark (Modern)",
+  "type": "dark",
+  "colors": {
+    "activityBar.background": "#14141E",
+    "activityBar.foreground": "#E0E0E0",
+    "editor.background": "#161622",
+    "editor.foreground": "#ABB2BF",
+    "editor.lineHighlightBackground": "#212133",
+    "editor.selectionBackground": "#3E4451",
+    "editorCursor.foreground": "#00E5FF",
+    "editorGroupHeader.tabsBackground": "#14141E",
+    "editorLineNumber.activeForeground": "#00E5FF",
+    "editorLineNumber.foreground": "#4B5263",
+    "sideBar.background": "#14141E",
+    "sideBar.border": "#212133",
+    "sideBar.foreground": "#ABB2BF",
+    "statusBar.background": "#14141E",
+    "statusBar.foreground": "#ABB2BF",
+    "tab.activeBackground": "#1E1E2E",
+    "tab.activeBorder": "#00E5FF",
+    "tab.activeForeground": "#FFFFFF",
+    "tab.inactiveBackground": "#14141E",
+    "tab.inactiveForeground": "#7F848E"
+  },
+  "tokenColors": [
+    {
+      "name": "Comments",
+      "scope": ["comment", "comment.line", "comment.block"],
+      "settings": {
+        "foreground": "#5C6370",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "name": "Keywords Control (always, initial, if, else, case, begin, end)",
+      "scope": [
+        "keyword.control",
+        "keyword.control.statement.verilog",
+        "keyword.control.block.verilog",
+        "keyword.control.conditional.verilog",
+        "keyword.control.loop.verilog"
+      ],
+      "settings": {
+        "foreground": "#C678DD",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Module Definition Keyword",
+      "scope": ["keyword.other.module.verilog"],
+      "settings": {
+        "foreground": "#C678DD",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Module Name",
+      "scope": ["entity.name.type.module.verilog"],
+      "settings": {
+        "foreground": "#61AFEF",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Port Direction (input, output, inout)",
+      "scope": ["storage.modifier.port.verilog"],
+      "settings": {
+        "foreground": "#E5C07B",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Net / Reg Types (wire, reg, integer)",
+      "scope": ["storage.type.net.verilog", "storage.type.variable.verilog"],
+      "settings": {
+        "foreground": "#56B6C2",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Parameter Declaration (parameter, localparam)",
+      "scope": ["storage.type.parameter.verilog"],
+      "settings": {
+        "foreground": "#E5C07B",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Timing Keywords (posedge, negedge)",
+      "scope": ["keyword.other.timing.verilog"],
+      "settings": {
+        "foreground": "#00E5FF",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Compiler Directives (`timescale, `define)",
+      "scope": ["keyword.other.directive.verilog"],
+      "settings": {
+        "foreground": "#E06C75",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Numbers and Sized Constants",
+      "scope": ["constant.numeric", "constant.numeric.based.verilog"],
+      "settings": {
+        "foreground": "#D19A66"
+      }
+    },
+    {
+      "name": "Strings",
+      "scope": ["string.quoted.double.verilog"],
+      "settings": {
+        "foreground": "#98C379"
+      }
+    },
+    {
+      "name": "System Tasks ($display, $finish)",
+      "scope": ["support.function.system.verilog"],
+      "settings": {
+        "foreground": "#61AFEF"
+      }
+    },
+    {
+      "name": "Built-in Gate Primitives (and, or, not, nand, xor)",
+      "scope": ["support.type.primitive.verilog"],
+      "settings": {
+        "foreground": "#56B6C2",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Operators",
+      "scope": ["keyword.operator"],
+      "settings": {
+        "foreground": "#ABB2BF"
+      }
+    },
+    {
+      "name": "Submodule Named Port Connection (.a(w))",
+      "scope": ["variable.parameter.port.verilog"],
+      "settings": {
+        "foreground": "#E5C07B"
+      }
+    }
+  ],
+  "semanticHighlighting": true,
+  "semanticTokenColors": {
+    "clock": { "foreground": "#00E5FF", "bold": true },
+    "reset": { "foreground": "#FF6E40", "bold": true },
+    "reg": { "foreground": "#E040FB", "italic": true },
+    "wire": { "foreground": "#69F0AE" },
+    "portInput": { "foreground": "#82AAFF", "bold": true },
+    "portOutput": { "foreground": "#FFD740", "bold": true },
+    "portInout": { "foreground": "#FFAB40" },
+    "parameter": { "foreground": "#F0F4F8", "bold": true },
+    "moduleDef": { "foreground": "#61AFEF", "bold": true },
+    "moduleInstance": { "foreground": "#C678DD" }
+  }
+}

@@ -8,7 +8,10 @@
 > This has a goal to be used as plain VS Code extension, you still need all your EDA tools, the objective is just improve productivity in the design of RTL.
 
 
-> Visual Studio Code Extension — 1-to-1 RTL Structural Viewer, STARC/RMM Linter, and Verilog (IEEE 1364) Language Intelligence
+> Visual Studio Code Extension — 1-to-1 RTL Structural Viewer, STARC/RMM Linter, and Verilog (IEEE 1364) / SystemVerilog (IEEE 1800) Language Intelligence
+
+> [!NOTE]
+> This fork adds IEEE 1800 SystemVerilog support to [Theryx by Luigi C. Filho](https://github.com/luigicfilho/theryx). The upstream repository published no source, so `src/` here was reconstructed from the published 0.1.2-alpha bundle and checked against it by differential testing. Many local variable names in those reconstructed modules are still the minifier's.
 
 ---
 
@@ -66,6 +69,25 @@ Theryx Verilog is a professional hardware engineering extension designed for dig
   - Displays signal direction, net type, and formatted bus width (e.g., `[7:0]`, `4 bits`, or scalar).
   - Displays evaluated constants and parameter values.
   - Displays complete submodule signatures, port lists, and file paths.
+
+### SystemVerilog (IEEE 1800)
+
+The language follows the file extension: `.sv` and `.svh` are parsed as IEEE 1800, while `.v` and `.vh` stay strict IEEE 1364.
+
+| Level | Constructs |
+| --- | --- |
+| **Parsed, linted, drawn, hoverable** | `logic`, `bit`, `int` and other data types; `typedef`; `enum`; packed `struct` and `union` with real member offsets; packages and `import`, including across workspace files; `always_ff`, `always_comb`, `always_latch`; `unique`, `priority`, `inside`, `foreach`, `return`; `++`, `+=`, `'0`, `'{...}`, casts, `+:` and `-:`; `.*` and `.name` connections; `parameter type`; interfaces and modports, flattened to per-signal ports; generate `if`, `case` and `for` without `generate` |
+| **Accepted without false errors, not drawn** | Classes (shown in the outline), assertions, properties, sequences, covergroups, `program` bodies drawn as modules, `clocking`, `fork`/`join`, dynamic arrays and queues, DPI imports |
+| **Preprocessor** | `` `define `` with arguments and line continuation, `` `include ``, `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `undef `` |
+
+Known limits:
+
+- A generate `for` loop is drawn as one copy of its body, not one copy per iteration.
+- A generate `if` or `case` with a constant condition uses its parameters' default values, so instance parameter overrides do not select a different branch. If the condition cannot be evaluated, all branches are kept.
+- Struct members have no hover of their own; hovering the signal shows its type and total width.
+- Macros defined outside the file and its `` `include `` chain cannot be expanded. They are left unjudged, not reported as errors.
+- Names following an import of a package that cannot be found are also left unjudged; the import itself gets a warning.
+- Hierarchical references and class members are accepted but not checked.
 
 ### 3. Automated Quick Fixes (`Ctrl + .`)
 
@@ -212,14 +234,14 @@ To install the distributed `.vsix` package:
 2. Navigate to the **Extensions** view (`Ctrl + Shift + X`).
 3. Click the **Views and More Actions** (`...`) menu at the top right of the Extensions panel.
 4. Select **Install from VSIX...**.
-5. Select the `theryx-verilog-0.1.2-alpha.vsix` package file.
+5. Select the `theryx-verilog-0.2.0-alpha.vsix` package file.
 6. Reload the window if prompted (`Ctrl + Shift + P` -> `Developer: Reload Window`).
 
 ### Method 2: Using the Command Line
 Run the following command in your terminal:
 
 ```powershell
-code --install-extension theryx-verilog-0.1.2-alpha.vsix --force
+code --install-extension theryx-verilog-0.2.0-alpha.vsix --force
 ```
 
 ---
@@ -227,15 +249,15 @@ code --install-extension theryx-verilog-0.1.2-alpha.vsix --force
 ## System Requirements
 
 - **Editor:** Visual Studio Code version 1.85.0 or higher.
-- **Supported File Formats:** Verilog design files (`.v`) and header files (`.vh`).
-- **Language Standard:** Verilog IEEE 1364.
+- **Supported File Formats:** Verilog (`.v`, `.vh`) and SystemVerilog (`.sv`, `.svh`) design and header files.
+- **Language Standards:** Verilog IEEE 1364 and SystemVerilog IEEE 1800.
 
 ---
 
 ## Author & License
 
 - **Extension:** Theryx Verilog
-- **Version:** 0.1.2-alpha
+- **Version:** 0.2.0-alpha
 - **Author:** Luigi C. Filho
 - **Organization:** LC Desenvolvimentos
 - **License:** Distributed under the [MIT](LICENSE) license.

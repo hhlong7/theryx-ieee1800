@@ -47,9 +47,36 @@ const ASSIGNMENT_OPERATORS = [
   "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "<<<=", ">>>=",
 ];
 
+// `A[3]` declares A0, A1, A2 and `B[2:4]` declares B2, B3, B4.
+function expandEnumRange(name, value, rangeExpr, rangeEnd) {
+  let item = { name: name.text, nameSpan: name.span, value, rangeExpr };
+  if (rangeExpr?.kind !== "NumberLiteral" || (rangeEnd && rangeEnd.kind !== "NumberLiteral")) {
+    return [item];
+  }
+  let first = rangeEnd ? rangeExpr.value : 0;
+  let last = rangeEnd ? rangeEnd.value : rangeExpr.value - 1;
+  let step = first <= last ? 1 : -1;
+  let items = [];
+  for (let index = first; items.length < 4096; index += step) {
+    items.push({ name: `${name.text}${index}`, nameSpan: name.span, value: items.length === 0 ? value : undefined, rangeExpr });
+    if (index === last) {
+      break;
+    }
+  }
+  return items;
+}
+
 export class SvParser extends Parser {
+  nestedUnits = [];
+  patternVariables = new Map();
   constructor(tokens, fileUri = "file:///untitled.sv") {
     super(tokens, fileUri);
+    // `$unit::name` reads like a package scope everywhere a scope is accepted.
+    tokens.forEach((token, index) => {
+      if (token.type === "SystemIdentifier" && token.text === "$unit" && tokens[index + 1]?.type === "::") {
+        token.type = "Identifier";
+      }
+    });
   }
 
   // ---- Compilation unit
@@ -72,6 +99,8 @@ export class SvParser extends Parser {
         }
       } else if (this.match("program")) {
         this.pushIfPresent(modules, this.parseDesignUnit("program", "endprogram"));
+      } else if (this.match("primitive")) {
+        this.pushIfPresent(modules, this.parsePrimitive());
       } else if (this.match("package")) {
         this.pushIfPresent(packages, this.parsePackage());
       } else if (this.check("class") || (this.check("virtual") && this.peekNext().type === "class")) {
@@ -87,6 +116,7 @@ export class SvParser extends Parser {
         this.advance();
       }
     }
+    modules.push(...this.nestedUnits);
     return {
       kind: "SourceFile",
       modules,
@@ -109,10 +139,70 @@ export class SvParser extends Parser {
       list.push(item);
     }
   }
-  skipEndLabel() {
-    if (this.match(":")) {
-      this.match("Identifier", "EscapedIdentifier", "new");
+  // Passing `expected` checks the label: null means the construct has no name to repeat.
+  skipEndLabel(expected) {
+    if (!this.match(":")) {
+      return;
     }
+    let label = this.match("Identifier", "EscapedIdentifier", "new") ? this.previous() : undefined;
+    if (!label || expected === undefined || label.text === expected) {
+      return;
+    }
+    this.addDiagnostic(
+      expected === null
+        ? `End label '${label.text}' has no matching block name`
+        : `End label '${label.text}' does not match '${expected}'`,
+      label.span,
+      "error",
+      "SYNTAX-END-LABEL",
+    );
+  }
+  // `matches` patterns bind variables with no declaration of their own.
+  addPatternVariables(items) {
+    let declared = new Set(items.flatMap((item) => item.declarators?.map((d) => d.name) ?? []));
+    for (let [name, span] of this.patternVariables) {
+      if (!declared.has(name)) {
+        items.push({
+          kind: "DataDeclaration",
+          dataType: { kind: "DataType", base: "int", dims: [], span },
+          declarators: [{ name, nameSpan: span, dims: [] }],
+          identifiers: [{ kind: "Identifier", name, span }],
+          svPatternVariable: true,
+          span,
+        });
+      }
+    }
+    this.patternVariables = new Map();
+  }
+  parsePrimitive() {
+    let keyword = this.previous();
+    let name = this.consumeName("Expected primitive name after 'primitive'");
+    let portNames = [];
+    if (this.check("(")) {
+      let close = this.skipBalanced(this.cursor, "(", ")");
+      for (let at = this.cursor; at < close; at++) {
+        if (this.tokens[at].type === "Identifier") {
+          portNames.push(this.tokens[at].text);
+        }
+      }
+    }
+    for (; !this.check("endprimitive") && !this.isAtEnd();) {
+      this.advance();
+    }
+    let end = this.consume("endprimitive", "Expected 'endprimitive' to close primitive");
+    this.skipEndLabel(name?.text);
+    if (!name) {
+      return null;
+    }
+    return {
+      kind: "ModuleDeclaration",
+      designUnit: "primitive",
+      name: name.text,
+      nameSpan: name.span,
+      items: [],
+      portNames,
+      span: this.combineSpans(keyword.span, end ? end.span : this.previous().span),
+    };
   }
   parsePackage() {
     let keyword = this.previous();
@@ -133,7 +223,7 @@ export class SvParser extends Parser {
       }
     }
     let end = this.consume("endpackage", "Expected 'endpackage' to close package");
-    this.skipEndLabel();
+    this.skipEndLabel(name.text);
     return {
       kind: "PackageDeclaration",
       name: name.text,
@@ -199,10 +289,14 @@ export class SvParser extends Parser {
       }
     }
     let end = this.consume(endKeyword, `Expected '${endKeyword}' to close ${unit} declaration`);
-    this.skipEndLabel();
+    this.skipEndLabel(name.text);
+    this.addPatternVariables(items);
+    let svPortExpressions = this.sawPortExpression;
+    this.sawPortExpression = false;
     return {
       kind: "ModuleDeclaration",
       designUnit: unit,
+      svPortExpressions,
       name: name.text,
       nameSpan: name.span,
       items,
@@ -354,6 +448,7 @@ export class SvParser extends Parser {
         this.consume(")", "Expected ')' after port expression");
         if (external) {
           portNames.push(external.text);
+          this.sawPortExpression = true;
         }
       } else if (this.isNonAnsiPortName(explicit, direction, dataType)) {
         let name = this.advance();
@@ -608,10 +703,11 @@ export class SvParser extends Parser {
       let cursor = this.cursor;
       let name = this.consumeName("Expected enum member name");
       let rangeExpr;
+      let rangeEnd;
       if (this.match("[")) {
         rangeExpr = this.parseExpression();
         if (this.match(":")) {
-          this.parseExpression();
+          rangeEnd = this.parseExpression();
         }
         this.consume("]", "Expected ']' in enum member");
       }
@@ -620,7 +716,7 @@ export class SvParser extends Parser {
         value = this.parseExpression();
       }
       if (name) {
-        node.enumItems.push({ name: name.text, nameSpan: name.span, value, rangeExpr });
+        node.enumItems.push(...expandEnumRange(name, value, rangeExpr, rangeEnd));
       }
       if (!this.match(",") && !this.check("}")) {
         this.addDiagnostic("Expected ',' between enum members", this.previous().span, "error", "SYNTAX-MISSING-COMMA");
@@ -667,6 +763,62 @@ export class SvParser extends Parser {
 
   // ---- Items shared by packages, $unit and modules
 
+  // `let f(a) = a;` and `nettype logic n;`: the declared name is what the rest of the file uses.
+  skipNamedDeclaration() {
+    let keyword = this.previous();
+    let start = this.cursor;
+    let depth = 0;
+    let name;
+    for (let at = start; at < this.tokens.length; at++) {
+      let type = this.tokens[at].type;
+      if (type === "(" || type === "[" || type === "{") {
+        depth++;
+      } else if (type === ")" || type === "]" || type === "}") {
+        depth--;
+      } else if (depth === 0 && (type === "Identifier" || type === "EscapedIdentifier")) {
+        name = this.tokens[at];
+        let next = this.tokens[at + 1]?.type;
+        if (keyword.type === "let" || next === ";" || next === "with") {
+          break;
+        }
+      } else if (depth === 0 && (type === ";" || type === "=")) {
+        break;
+      }
+    }
+    this.skipToSemicolon();
+    return name
+      ? { kind: "NamedRegion", regionKind: keyword.type, name: name.text, nameSpan: name.span, span: keyword.span }
+      : null;
+  }
+  parseExport() {
+    let keyword = this.previous();
+    let exports = [];
+    if (this.check("StringLiteral")) {
+      this.skipToSemicolon();
+      return null;
+    }
+    do {
+      let pkg = this.match("*") ? this.previous() : this.consumeName("Expected package name in export");
+      this.consume("::", "Expected '::' in export");
+      let item = this.match("*") ? this.previous() : this.consumeName("Expected item name in export");
+      if (pkg && item) {
+        exports.push({ packageName: pkg.text, item: item.text });
+      }
+    } while (this.match(","));
+    let end = this.consume(";", "Expected ';' after export");
+    return { kind: "ExportDeclaration", exports, span: this.combineSpans(keyword.span, end ? end.span : this.previous().span) };
+  }
+  skipOutOfBlockConstraint() {
+    for (; !this.check("{") && !this.check(";") && !this.isAtEnd();) {
+      this.advance();
+    }
+    if (this.check("{")) {
+      this.cursor = this.skipBalanced(this.cursor, "{", "}");
+    } else {
+      this.match(";");
+    }
+    return null;
+  }
   parseDeclarationItem() {
     if (this.match(";")) {
       return null;
@@ -675,8 +827,13 @@ export class SvParser extends Parser {
       return this.parseImportOrDpi();
     }
     if (this.match("export")) {
-      this.skipToSemicolon();
-      return null;
+      return this.parseExport();
+    }
+    if (this.check("constraint") || (this.check("static") && this.peekNext().type === "constraint")) {
+      return this.skipOutOfBlockConstraint();
+    }
+    if (this.check("interface") && this.peekNext().type === "class") {
+      return this.skipClass();
     }
     if (this.match("parameter", "localparam")) {
       return this.parseParameterDeclaration();
@@ -696,7 +853,10 @@ export class SvParser extends Parser {
       this.skipToSemicolon();
       return null;
     }
-    if (this.match("bind", "nettype", "let")) {
+    if (this.match("nettype", "let")) {
+      return this.skipNamedDeclaration();
+    }
+    if (this.match("bind")) {
       this.skipToSemicolon();
       return null;
     }
@@ -746,6 +906,7 @@ export class SvParser extends Parser {
   skipRegion(keyword) {
     let end = SKIPPED_REGIONS[keyword];
     let start = this.advance();
+    let regionName = this.check("Identifier") ? this.peek() : undefined;
     let depth = 1;
     for (; !this.isAtEnd() && depth > 0;) {
       let type = this.peek().type;
@@ -759,8 +920,10 @@ export class SvParser extends Parser {
     if (depth > 0) {
       this.addDiagnostic(`Expected '${end}' to close ${keyword}`, start.span);
     }
-    this.skipEndLabel();
-    return null;
+    this.skipEndLabel(regionName?.text);
+    return regionName
+      ? { kind: "NamedRegion", regionKind: keyword, name: regionName.text, nameSpan: regionName.span, span: start.span }
+      : null;
   }
   // `default clocking name;` refers to a block declared elsewhere; other forms declare one.
   parseDefaultClocking() {
@@ -775,6 +938,7 @@ export class SvParser extends Parser {
     this.match("virtual", "interface");
     this.advance();
     let name = this.match("Identifier", "EscapedIdentifier") ? this.previous() : null;
+    let baseName = this.classBaseName();
     let depth = 1;
     for (; !this.isAtEnd() && depth > 0;) {
       let type = this.peek().type;
@@ -789,14 +953,30 @@ export class SvParser extends Parser {
       this.addDiagnostic("Expected 'endclass' to close class", start);
     }
     let span = this.combineSpans(start, this.previous().span);
-    this.skipEndLabel();
-    return { kind: "ClassDeclaration", name: name?.text ?? "<error>", nameSpan: name?.span ?? start, span };
+    this.skipEndLabel(name?.text);
+    return { kind: "ClassDeclaration", name: name?.text ?? "<error>", nameSpan: name?.span ?? start, baseName, span };
+  }
+  classBaseName() {
+    let at = this.cursor;
+    if (this.tokens[at]?.type === "#" && this.tokens[at + 1]?.type === "(") {
+      at = this.skipBalanced(at + 1, "(", ")");
+    }
+    let base = this.tokens[at + 1];
+    // A scoped base such as uvm_pkg::uvm_object is left to the package check.
+    return this.tokens[at]?.type === "extends" && base?.type === "Identifier" && this.tokens[at + 2]?.type !== "::" ? base : undefined;
   }
   parseImportOrDpi() {
     let keyword = this.previous();
     if (this.check("StringLiteral")) {
+      let name;
+      for (let at = this.cursor; at < this.tokens.length && this.tokens[at].type !== ";"; at++) {
+        if (this.tokens[at].type === "Identifier" && ["(", ";"].includes(this.tokens[at + 1]?.type)) {
+          name = this.tokens[at];
+          break;
+        }
+      }
       this.skipToSemicolon();
-      return null;
+      return name ? { kind: "NamedRegion", regionKind: "let", name: name.text, nameSpan: name.span, span: keyword.span } : null;
     }
     let imports = [];
     do {
@@ -819,8 +999,24 @@ export class SvParser extends Parser {
       span: this.combineSpans(keyword.span, end ? end.span : this.previous().span),
     };
   }
+  forwardTypedef(keyword) {
+    let at = this.cursor;
+    if (["enum", "struct", "union", "class", "interface"].includes(this.tokens[at]?.type)) {
+      at += this.tokens[at]?.type === "interface" && this.tokens[at + 1]?.type === "class" ? 2 : 1;
+    }
+    if (this.tokens[at]?.type !== "Identifier" || this.tokens[at + 1]?.type !== ";") {
+      return null;
+    }
+    let name = this.tokens[at];
+    this.cursor = at + 2;
+    return { kind: "NamedRegion", regionKind: "typedef", isForward: true, name: name.text, nameSpan: name.span, span: keyword.span };
+  }
   parseTypedef() {
     let keyword = this.previous();
+    let forward = this.forwardTypedef(keyword);
+    if (forward) {
+      return forward;
+    }
     if (this.match("enum", "struct", "union", "class") && (this.check("Identifier") && this.peekNext().type === ";")) {
       this.advance();
       this.advance();
@@ -903,6 +1099,9 @@ export class SvParser extends Parser {
         this.cursor = this.skipBalanced(this.cursor, "(", ")");
       }
       this.match("vectored", "scalared");
+      if (this.match("#")) {
+        this.skipDelayValue();
+      }
     }
     let dataType;
     if (netType && this.check("Identifier") && !this.typeIsFollowedByName()) {
@@ -963,12 +1162,23 @@ export class SvParser extends Parser {
     if (this.match(";")) {
       return null;
     }
-    if (this.check("Identifier") && this.peekNext().type === ":" && this.isConcurrentAssertion(this.cursor + 2)) {
+    if (this.check("Identifier") && this.peekNext().type === ":" && this.isAssertionKeyword(this.cursor + 2)) {
       this.advance();
       this.advance();
     }
     if (this.isConcurrentAssertion(this.cursor)) {
       return this.parseConcurrentAssertion();
+    }
+    if (this.isAssertionKeyword(this.cursor)) {
+      // Deferred assertions and `assert (...)` are allowed directly in a module body.
+      let statement = this.parseImmediateAssertion();
+      return { kind: "AssertionItem", span: statement.span };
+    }
+    if (this.check("SystemIdentifier") && this.peekNext().type === "(") {
+      // Elaboration system tasks such as $error and $info.
+      let keyword = this.advance();
+      this.skipToSemicolon();
+      return { kind: "AssertionItem", span: keyword.span };
     }
     if (this.match("input", "output", "inout", "ref")) {
       return this.parseBodyPortDeclaration();
@@ -1010,21 +1220,24 @@ export class SvParser extends Parser {
       this.skipToSemicolon();
       return null;
     }
+    if (this.check("interface") && this.peekNext().type === "class") {
+      return this.skipClass();
+    }
+    // A nested definition behaves like a top-level one for every purpose this extension has.
     if (this.match("interface")) {
-      this.pushNested("endinterface");
+      this.pushIfPresent(this.nestedUnits, this.parseDesignUnit("interface", "endinterface"));
       return null;
     }
     if (this.match("module", "macromodule")) {
-      this.pushNested("endmodule");
+      this.pushIfPresent(this.nestedUnits, this.parseDesignUnit("module", "endmodule"));
       return null;
     }
     if (this.match("program")) {
-      this.pushNested("endprogram");
+      this.pushIfPresent(this.nestedUnits, this.parseDesignUnit("program", "endprogram"));
       return null;
     }
     if (this.check("global")) {
-      this.skipToSemicolon();
-      return null;
+      return this.skipGlobalClocking();
     }
     if (this.checkAny(GATE_LIKE)) {
       this.skipToSemicolon();
@@ -1034,8 +1247,8 @@ export class SvParser extends Parser {
       return this.parseGateInstantiation();
     }
     if (this.isSpecparam()) {
-      this.skipToSemicolon();
-      return null;
+      this.advance();
+      return this.skipNamedDeclaration();
     }
     let declaration = this.parseDeclarationItem();
     if (declaration !== null && declaration !== undefined) {
@@ -1046,6 +1259,16 @@ export class SvParser extends Parser {
     }
     if (this.isInstanceStart()) {
       return this.parseInstanceList();
+    }
+    return null;
+  }
+  skipGlobalClocking() {
+    for (; !this.check("endclocking") && !this.check(";") && !this.isAtEnd();) {
+      this.advance();
+    }
+    if (this.match(";") && this.check("endclocking")) {
+      this.advance();
+      this.skipEndLabel();
     }
     return null;
   }
@@ -1065,6 +1288,10 @@ export class SvParser extends Parser {
       this.advance();
     }
     this.skipEndLabel();
+  }
+  isAssertionKeyword(at) {
+    let type = this.tokens[at]?.type;
+    return type === "assert" || type === "assume" || type === "cover" || type === "restrict" || type === "expect";
   }
   isConcurrentAssertion(at) {
     let type = this.tokens[at]?.type;
@@ -1179,7 +1406,7 @@ export class SvParser extends Parser {
           }
           this.consume(")", "Expected ')' after modport expression");
           if (port) {
-            ports.push({ direction, name: port.text });
+            ports.push({ direction, name: port.text, isExpression: true });
           }
         } else {
           let port = this.consumeName("Expected modport port name");
@@ -1465,7 +1692,7 @@ export class SvParser extends Parser {
       }
     }
     let end = this.consume("end", "Expected 'end' to close generate block");
-    this.skipEndLabel();
+    this.skipEndLabel(name);
     return {
       kind: "GenerateBlockStatement",
       name,
@@ -1478,6 +1705,7 @@ export class SvParser extends Parser {
     let keyword = this.previous();
     this.consume("(", "Expected '(' after 'for'");
     this.match("genvar");
+    let declaresGenvar = this.previous().type === "genvar";
     let initExpr = this.parseForAssignment();
     this.consume(";", "Expected ';' after for-loop initialisation");
     let condition = this.parseExpression();
@@ -1487,6 +1715,7 @@ export class SvParser extends Parser {
     let body = this.parseGenerateItem();
     return {
       kind: "GenerateLoopStatement",
+      declaresGenvar,
       loopKind: "for",
       initExpr,
       condition,
@@ -1557,10 +1786,12 @@ export class SvParser extends Parser {
     let sensitivities = [];
     let isSequential = false;
     let delayExpr;
+    let hasEventControl = false;
     if (this.check("#")) {
       this.advance();
       delayExpr = this.parseDelayExpression();
     } else if (this.check("@") || this.check("@@")) {
+      hasEventControl = true;
       let events = this.parseEventControl();
       sensitivities = events.sensitivities;
       isSequential = events.isSequential;
@@ -1572,6 +1803,7 @@ export class SvParser extends Parser {
     return {
       kind: "AlwaysBlock",
       alwaysKind: keyword.type,
+      hasEventControl,
       isSequential: isSequential || (keyword.type === "always_ff" && sensitivities.length > 0),
       sensitivities,
       delayExpr,
@@ -1721,8 +1953,10 @@ export class SvParser extends Parser {
   }
   parseSubroutineRest(kind, endKeyword, keyword, lifetime, returnType) {
     let name = this.consumeName(`Expected ${kind} name`);
+    let outOfBlock = false;
     for (; this.match("::");) {
       name = this.match("new") ? this.previous() : this.consumeName(`Expected ${kind} name`);
+      outOfBlock = true;
     }
     let ports = [];
     if (this.match("(")) {
@@ -1749,8 +1983,12 @@ export class SvParser extends Parser {
       }
     }
     let end = this.consume(endKeyword, `Expected '${endKeyword}' to close ${kind}`);
-    this.skipEndLabel();
+    this.skipEndLabel(name?.text);
     let span = this.combineSpans(keyword.span, end ? end.span : this.previous().span);
+    // An out-of-block method belongs to its class, whose body this extension does not model.
+    if (outOfBlock) {
+      return null;
+    }
     if (kind === "function") {
       return {
         kind: "FunctionDeclaration",
@@ -1802,13 +2040,17 @@ export class SvParser extends Parser {
         dataType = this.parseDataType();
       }
       let name = this.consumeName("Expected identifier in port declaration");
-      this.parseUnpackedDimensions();
+      let dimensions = this.parseUnpackedDimensions();
+      let hasDefault = false;
       if (this.match("=")) {
         this.parseExpression();
+        hasDefault = true;
       }
       if (name) {
         ports.push({
           kind: "PortDeclaration",
+          hasDefault,
+          dimensions: dimensions.length ? dimensions : undefined,
           direction,
           netType: dataType?.base,
           dataType,
@@ -1835,7 +2077,7 @@ export class SvParser extends Parser {
       // Statement label.
       let after = this.tokens[this.cursor + 2]?.type;
       if (after !== undefined) {
-        this.advance();
+        this.statementLabel = this.advance().text;
         this.advance();
       }
     }
@@ -1879,6 +2121,9 @@ export class SvParser extends Parser {
     }
     if (this.match("randcase")) {
       return this.parseRandCase();
+    }
+    if (this.match("randsequence")) {
+      return this.skipRandSequence();
     }
     if (this.match("for")) {
       return this.parseForStatement();
@@ -1944,6 +2189,11 @@ export class SvParser extends Parser {
     if (this.check("assert") || this.check("assume") || this.check("cover") || this.check("restrict") || this.check("expect")) {
       return this.parseImmediateAssertion();
     }
+    if (this.check("SystemIdentifier") && this.peek().text === "$root") {
+      let keyword = this.advance();
+      this.skipToSemicolon();
+      return { kind: "EmptyStatement", span: keyword.span };
+    }
     if (this.check("SystemIdentifier")) {
       return this.parseSystemTaskStatement();
     }
@@ -1964,9 +2214,19 @@ export class SvParser extends Parser {
     }
     return this.parseAssignmentOrCall();
   }
+  skipRandSequence() {
+    let keyword = this.previous();
+    for (; !this.check("endsequence") && !this.isAtEnd();) {
+      this.advance();
+    }
+    let end = this.consume("endsequence", "Expected 'endsequence' to close randsequence");
+    return { kind: "EmptyStatement", span: this.combineSpans(keyword.span, end ? end.span : this.previous().span) };
+  }
   parseBlock(open, close) {
     let keyword = this.previous();
-    let name;
+    // `name: begin ... end : name` names the block just like `begin : name`.
+    let name = this.statementLabel;
+    this.statementLabel = undefined;
     if (this.match(":")) {
       name = this.consumeName(`Expected block name after ':' in ${open} statement`)?.text;
     }
@@ -1984,17 +2244,20 @@ export class SvParser extends Parser {
       }
     }
     let end;
+    let joinKind;
     if (open === "fork") {
       end = this.match("join", "join_any", "join_none") ? this.previous() : this.consume("join", "Expected 'join' to close fork");
+      joinKind = end?.type;
     } else {
       end = this.consume(close, "Expected 'end' to close block");
     }
-    this.skipEndLabel();
+    this.skipEndLabel(name ?? null);
     return {
       kind: "BlockStatement",
       name,
       statements,
       blockKind: open,
+      joinKind,
       span: this.combineSpans(keyword.span, end ? end.span : this.previous().span),
     };
   }
@@ -2178,7 +2441,10 @@ export class SvParser extends Parser {
         continue;
       }
       let name = this.consumeName("Expected loop variable in foreach");
-      loopVars.push(name ? { name: name.text, span: name.span } : null);
+      if (!name) {
+        break;
+      }
+      loopVars.push({ name: name.text, span: name.span });
       if (!this.check("]")) {
         this.consume(",", "Expected ',' between foreach loop variables");
       }
@@ -2273,6 +2539,10 @@ export class SvParser extends Parser {
   }
   parseImmediateAssertion() {
     let keyword = this.advance();
+    if (keyword.type === "expect" && this.check("(")) {
+      this.cursor = this.skipBalanced(this.cursor, "(", ")");
+      return this.parseActionBlock(keyword);
+    }
     if (this.match("property", "sequence")) {
       if (this.check("(")) {
         this.cursor = this.skipBalanced(this.cursor, "(", ")");
@@ -2515,14 +2785,20 @@ export class SvParser extends Parser {
     for (; !this.check(")") && !this.isAtEnd();) {
       let cursor = this.cursor;
       if (this.check(",")) {
+        args.svSkipped = (args.svSkipped ?? 0) + 1;
         this.advance();
         continue;
       }
       if (this.match(".")) {
-        this.consumeName("Expected argument name after '.'");
+        let name = this.consumeName("Expected argument name after '.'");
         this.consume("(", "Expected '(' after argument name");
         if (!this.check(")")) {
-          args.push(this.parseTypeOrExpressionArgument());
+          let value = this.parseTypeOrExpressionArgument();
+          value.svArgName = name?.text;
+          args.push(value);
+        }
+        if (name) {
+          (args.svNames ??= []).push(name.text);
         }
         this.consume(")", "Expected ')' after named argument");
       } else {
@@ -2584,6 +2860,9 @@ export class SvParser extends Parser {
   }
   parseTernary() {
     let condition = this.parseImplication();
+    if (this.match("matches")) {
+      this.parseLogicalOr();
+    }
     if (this.match("?")) {
       let trueExpr = this.parseExpression();
       this.consume(":", "Expected ':' in ternary conditional operator");
@@ -2704,6 +2983,8 @@ export class SvParser extends Parser {
       }
       if (this.check("(")) {
         this.cursor = this.skipBalanced(this.cursor, "(", ")");
+      } else if (this.check("Identifier") || this.check("this")) {
+        this.parseUnary();
       }
       return { kind: "OpaqueExpression", text: "new", span: this.combineSpans(token.span, this.previous().span) };
     }
@@ -2712,6 +2993,9 @@ export class SvParser extends Parser {
     }
     if (this.match("tagged")) {
       this.consumeName("Expected member after 'tagged'");
+      if (this.isPatternVariableStart()) {
+        return this.parsePatternVariable();
+      }
       if (this.isExpressionStart()) {
         return this.parseUnary();
       }
@@ -2796,6 +3080,20 @@ export class SvParser extends Parser {
       span: this.combineSpans(start, close ? close.span : expression.span),
     };
   }
+  isPatternVariableStart() {
+    return this.check(".*") || (this.check(".") && this.peekNext().type === "Identifier");
+  }
+  parsePatternVariable() {
+    if (this.match(".*")) {
+      return { kind: "OpaqueExpression", text: ".*", span: this.previous().span };
+    }
+    this.advance();
+    let name = this.advance();
+    if (!this.patternVariables.has(name.text)) {
+      this.patternVariables.set(name.text, name.span);
+    }
+    return { kind: "OpaqueExpression", text: `.${name.text}`, span: name.span };
+  }
   parseAssignmentPattern() {
     let open = this.advance();
     let items = [];
@@ -2805,6 +3103,11 @@ export class SvParser extends Parser {
         this.advance();
         this.advance();
         items.push({ isDefault: true, value: this.parseExpression() });
+      } else if (this.isPatternVariableStart()) {
+        items.push({ value: this.parsePatternVariable() });
+      } else if (this.check(".") && this.peekNext().type !== "Identifier") {
+        this.addDiagnostic("Expected pattern variable after '.'", this.peek().span);
+        this.advance();
       } else {
         let first = this.parseTypeOrExpressionArgument();
         if (this.match(":")) {
@@ -2856,8 +3159,26 @@ export class SvParser extends Parser {
     let current = node;
     let start = node.span;
     for (;;) {
+      if (this.check("#") && this.tokens[this.cursor + 1]?.type === "(" && (current.kind === "Identifier" || current.kind === "ScopedIdentifier")) {
+        // Parameterized class scope: name#(...)::member
+        let after = this.skipBalanced(this.cursor + 1, "(", ")");
+        if (this.tokens[after]?.type === "::") {
+          this.cursor = after;
+          continue;
+        }
+      }
+      if (this.check("with") && current.kind === "MemberSelect") {
+        // Array method without parentheses: q.find with (item > 0)
+        this.skipWithClause();
+        current = { kind: "FunctionCall", name: current.member, target: current, args: [], span: this.combineSpans(start, this.previous().span) };
+        continue;
+      }
       if (this.match("::")) {
         let member = this.match("new") ? this.previous() : this.consumeName("Expected identifier after '::'");
+        if (typeof (current.name ?? current.text) !== "string") {
+          this.addDiagnostic("'::' must follow a package or class name", this.previous().span, "error", "SYNTAX-SCOPE");
+          continue;
+        }
         current = {
           kind: "ScopedIdentifier",
           scope: current.name ?? current.text,
@@ -2925,6 +3246,10 @@ export class SvParser extends Parser {
     let close = this.consume(")", "Expected ')' after function call arguments");
     if (this.check("with")) {
       this.skipWithClause();
+      // `q.find(x) with (x > 0)`: the argument names an iterator rather than using a variable.
+      if (target.kind === "MemberSelect") {
+        args = [];
+      }
     }
     return {
       kind: "FunctionCall",

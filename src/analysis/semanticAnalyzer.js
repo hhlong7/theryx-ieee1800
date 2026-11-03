@@ -16,6 +16,7 @@ export class SemanticAnalyzer {
     this.diagnostics = [];
     this.currentModuleName = "";
     this.currentFileUri = d.span.fileUri ?? "";
+    this.isSystemVerilog = d.isSystemVerilog === true;
     for (let moduleItem of d.modules) {
       let k = scalarSymbol(moduleItem.name, "module", moduleItem.span);
       if (!this.symbolTable.globalScope.define(k)) {
@@ -267,6 +268,8 @@ export class SemanticAnalyzer {
       let J = M
         ? vectorSymbol(identifier.name, "port", E, C, identifier.span, d.direction, d.netType)
         : scalarSymbol(identifier.name, "port", identifier.span, d.direction, d.netType);
+      // Subroutine arguments are local copies, so even an input may be written.
+      J.svLocal = d.svLocal;
       k.define(J);
     }
   }
@@ -315,6 +318,10 @@ export class SemanticAnalyzer {
     let v = d.netType === "reg" || d.svVariable ? "reg" : "wire";
     for (let identifier of d.identifiers) {
       let resolve = k.resolve(identifier.name);
+      // Module names live in their own name space: `module test; logic test;` is fine.
+      if (this.isSystemVerilog && resolve?.kind === "module") {
+        resolve = undefined;
+      }
       if (resolve) {
         if (resolve.kind === "port") {
           resolve.netType = d.netType;
@@ -344,7 +351,7 @@ export class SemanticAnalyzer {
     if (primaryIdentifier) {
       let resolve = this.symbolTable.currentScope.resolve(primaryIdentifier.name);
       if (resolve) {
-        if (resolve.direction === "input") {
+        if (resolve.direction === "input" && !resolve.svLocal) {
           this.addDiagnostic(
             `Cannot assign to input port '${primaryIdentifier.name}'`,
             primaryIdentifier.span,
@@ -399,7 +406,7 @@ export class SemanticAnalyzer {
         if (primaryIdentifier) {
           let resolve = this.symbolTable.currentScope.resolve(primaryIdentifier.name);
           if (resolve) {
-            if (resolve.direction === "input") {
+            if (resolve.direction === "input" && !resolve.svLocal) {
               this.addDiagnostic(
                 `Cannot assign to input port '${primaryIdentifier.name}'`,
                 primaryIdentifier.span,

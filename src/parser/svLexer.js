@@ -1,4 +1,4 @@
-import { Lexer, makeSpan } from "./lexer.js";
+import { KEYWORD_SET, Lexer, makeSpan } from "./lexer.js";
 
 // IEEE 1800-2017 Annex B reserved keywords.
 export const SV_KEYWORDS = new Set(
@@ -33,11 +33,15 @@ const SV_OPERATORS = [
 ];
 
 const TIME_UNITS = ["fs", "ps", "ns", "us", "ms", "s"];
+const DESIGN_UNIT_OPENERS = new Set(["module", "macromodule", "program", "primitive", "package"]);
+const DESIGN_UNIT_CLOSERS = new Set(["endmodule", "endprogram", "endprimitive", "endpackage"]);
 
 const NO_ARGUMENT_DIRECTIVES = new Set([
   "celldefine", "endcelldefine", "resetall", "nounconnected_drive", "end_keywords",
   "delay_mode_distributed", "delay_mode_path", "delay_mode_unit", "delay_mode_zero",
 ]);
+
+const OTHER_DIRECTIVES = new Set(["define", "undef", "undefineall", "include", "ifdef", "ifndef", "else", "elsif", "endif", "__FILE__", "__LINE__"]);
 
 const REST_OF_LINE_DIRECTIVES = new Set([
   "timescale", "default_nettype", "unconnected_drive", "line", "pragma", "begin_keywords",
@@ -45,6 +49,8 @@ const REST_OF_LINE_DIRECTIVES = new Set([
 ]);
 
 const MAX_MACRO_DEPTH = 64;
+// A handful of nested macros can ask for billions of tokens; stop long before that.
+const MAX_MACRO_EXPANSIONS = 200000;
 
 export class SvLexer extends Lexer {
   macros;
@@ -53,8 +59,16 @@ export class SvLexer extends Lexer {
   callSite;
   output = [];
   includeStack;
+  diagnostics;
+  expansionBudget;
+  nettypeChanges = [];
+  designUnitDepth = 0;
+  hasUnresolvedInclude = false;
+  legacyKeywords = [];
   constructor(source, fileUri = "file:///untitled.sv", options = {}) {
-    super(source, fileUri);
+    super(source.charCodeAt(0) === 0xfeff ? source.slice(1) : source, fileUri);
+    this.diagnostics = options.diagnostics ?? [];
+    this.expansionBudget = options.expansionBudget ?? { used: 0 };
     this.macros = options.macros ?? new Map();
     this.includeResolver = options.includeResolver;
     this.macroDepth = options.macroDepth ?? 0;
@@ -79,10 +93,80 @@ export class SvLexer extends Lexer {
         this.skipAttribute();
         continue;
       }
-      this.output.push(this.nextToken());
+      let token = this.nextToken();
+      this.checkLiteral(token);
+      this.trackDesignUnit(token);
+      // `\\cpu3 ` and `cpu3` are one identifier (IEEE 1800 5.6.1).
+      if (token.type === "EscapedIdentifier" && /^\\[a-zA-Z_][a-zA-Z0-9_$]*$/.test(token.text) && !SV_KEYWORDS.has(token.text.slice(1))) {
+        token.type = "Identifier";
+        token.text = token.text.slice(1);
+      }
+      this.output.push(token);
+    }
+    if (this.macroDepth === 0 && this.includeStack.length === 1 && this.conditionalStack.length > 0) {
+      this.addLexerError("Missing `endif for a conditional directive", this.line, this.column);
     }
     this.output.push(this.createToken("EOF", "", this.line, this.column));
     return this.output;
+  }
+  trackDesignUnit(token) {
+    if (DESIGN_UNIT_OPENERS.has(token.type)) {
+      this.designUnitDepth++;
+    } else if (DESIGN_UNIT_CLOSERS.has(token.type)) {
+      this.designUnitDepth--;
+    }
+  }
+  readDirectiveLine() {
+    let text = "";
+    for (; !this.isAtEnd() && this.peek() !== "\n";) {
+      text += this.advance();
+    }
+    return text.replace(/\/\/.*$/, "").replace(/\/\*.*?\*\//g, "").trim();
+  }
+  // Rest-of-line directives have a fixed form; a macro in the arguments defers the question.
+  checkDirectiveLine(name, text, line, column) {
+    if (text.includes("`")) {
+      return;
+    }
+    if (name === "line" && !/^\d+\s+"[^"]*"\s+[012]$/.test(text)) {
+      this.addLexerError("`line needs a positive number, a quoted file name and a level of 0, 1 or 2", line, column);
+    } else if (name === "timescale") {
+      this.checkTimescale(text, line, column);
+    } else if (name === "unconnected_drive" && text !== "pull0" && text !== "pull1") {
+      this.addLexerError("`unconnected_drive takes pull0 or pull1", line, column);
+    } else if (name === "pragma" && text === "") {
+      this.addLexerError("`pragma needs a pragma name", line, column);
+    }
+  }
+  checkTimescale(text, line, column) {
+    let parts = /^(1|10|100)\s*(s|ms|us|ns|ps|fs)\s*\/\s*(1|10|100)\s*(s|ms|us|ns|ps|fs)$/.exec(text);
+    if (!parts) {
+      this.addLexerError("`timescale needs 1, 10 or 100 and a time unit, for both unit and precision", line, column);
+      return;
+    }
+    let power = (value, unit) => Math.log10(Number(value)) + 3 * TIME_UNITS.indexOf(unit);
+    if (power(parts[3], parts[4]) > power(parts[1], parts[2])) {
+      this.addLexerError("`timescale precision cannot be coarser than the time unit", line, column);
+    }
+  }
+  checkLiteral(token) {
+    if (token.type === "StringLiteral") {
+      let text = token.text;
+      if (text.length < 2 || !text.endsWith('"') || /(^|[^\\])\n/.test(text)) {
+        this.diagnostics.push({ message: "Unterminated string literal", severity: "error", code: "SYNTAX-STRING", span: this.callSite ?? token.span });
+      }
+    } else if (token.type === "NumberLiteral") {
+      let based = /^\d*\s*'[sS]?([bBoOdDhH])\s*(.*)$/.exec(token.text);
+      let digits = based?.[2].replace(/_/g, "");
+      let valid = { b: /^[01xzXZ?]+$/, o: /^[0-7xzXZ?]+$/, d: /^(\d+|[xXzZ?])$/, h: /^[0-9a-fA-FxzXZ?]+$/ };
+      if (based && !valid[based[1].toLowerCase()].test(digits)) {
+        this.diagnostics.push({ message: `Invalid digits in number '${token.text}'`, severity: "error", code: "SYNTAX-NUMBER", span: this.callSite ?? token.span });
+      }
+    }
+  }
+  addLexerError(message, line, column) {
+    let span = this.callSite ?? this.spanForRange(line, column, this.line, this.column);
+    this.diagnostics.push({ message, severity: "error", code: "SYNTAX-PREPROCESSOR", span });
   }
   isAttributeStart() {
     if (this.peek() !== "(" || this.peekNext() !== "*") {
@@ -134,6 +218,8 @@ export class SvLexer extends Lexer {
           if (top.currentActive) {
             top.branchTaken = true;
           }
+        } else {
+          this.addLexerError("`elsif without a matching `ifdef", line, column);
         }
         return;
       }
@@ -144,17 +230,33 @@ export class SvLexer extends Lexer {
           if (top.currentActive) {
             top.branchTaken = true;
           }
+        } else {
+          this.addLexerError("`else without a matching `ifdef", line, column);
         }
         return;
       }
       case "endif":
+        if (this.conditionalStack.length === 0) {
+          this.addLexerError("`endif without a matching `ifdef", line, column);
+        }
         this.conditionalStack.pop();
         return;
     }
     if (!this.isActive()) {
       return;
     }
-    if (name === "define") {
+    if (name === "default_nettype") {
+      this.scanDefaultNettype(line);
+    } else if (name === "resetall") {
+      if (this.designUnitDepth > 0) {
+        this.addLexerError("`resetall is not allowed inside a design unit", line, column);
+      }
+      this.nettypeChanges.push({ line, value: "wire" });
+    } else if (name === "begin_keywords") {
+      this.scanBeginKeywords();
+    } else if (name === "end_keywords") {
+      this.legacyKeywords.pop();
+    } else if (name === "define") {
       this.scanDefine();
     } else if (name === "undef") {
       this.macros.delete(this.readIdentifierForDirective());
@@ -165,13 +267,32 @@ export class SvLexer extends Lexer {
     } else if (name === "__LINE__") {
       this.output.push(this.createToken("NumberLiteral", String(line), line, column));
     } else if (REST_OF_LINE_DIRECTIVES.has(name)) {
-      this.skipRestOfLine();
+      this.checkDirectiveLine(name, this.readDirectiveLine(), line, column);
     } else if (!NO_ARGUMENT_DIRECTIVES.has(name)) {
       this.expandMacro(name, line, column);
     }
   }
+  scanDefaultNettype(line) {
+    this.skipInlineWhitespace();
+    let value = "";
+    for (; !this.isAtEnd() && this.isAlphaNumericOrUnderscore(this.peek());) {
+      value += this.advance();
+    }
+    this.nettypeChanges.push({ line, value });
+  }
+  scanBeginKeywords() {
+    this.skipInlineWhitespace();
+    let version = "";
+    for (; !this.isAtEnd() && this.peek() !== "\n";) {
+      version += this.advance();
+    }
+    this.legacyKeywords.push(/"1364-/.test(version));
+  }
   scanDefine() {
     let name = this.readIdentifierForDirective();
+    if (name && (NO_ARGUMENT_DIRECTIVES.has(name) || REST_OF_LINE_DIRECTIVES.has(name) || OTHER_DIRECTIVES.has(name))) {
+      this.addLexerError(`Compiler directive '\`${name}' cannot be redefined`, this.line, this.column);
+    }
     if (!name) {
       this.skipRestOfLine();
       return;
@@ -331,6 +452,12 @@ export class SvLexer extends Lexer {
     if (this.macroDepth >= MAX_MACRO_DEPTH) {
       return;
     }
+    if (++this.expansionBudget.used > MAX_MACRO_EXPANSIONS) {
+      if (this.expansionBudget.used === MAX_MACRO_EXPANSIONS + 1) {
+        this.addLexerError(`Too many macro expansions (limit ${MAX_MACRO_EXPANSIONS}); the rest are ignored`, line, column);
+      }
+      return;
+    }
     let body = macro.body;
     if (macro.params) {
       let mark = { index: this.index, line: this.line, column: this.column };
@@ -339,12 +466,13 @@ export class SvLexer extends Lexer {
         this.index = mark.index;
         this.line = mark.line;
         this.column = mark.column;
-        this.output.push(this.createToken("MacroReference", "`" + name, line, column));
+        this.addLexerError(`Macro '${name}' needs an argument list`, line, column);
         return;
       }
       this.advance();
       let args = this.readBalancedArguments();
       site = this.callSite ?? this.spanForRange(line, column, this.line, this.column);
+      this.checkMacroArguments(name, macro, args, line, column);
       body = this.substituteMacroArguments(macro, args);
     }
     body = body.replace(/`\\`"/g, '\\"').replace(/`"/g, '"').replace(/``/g, "");
@@ -354,9 +482,23 @@ export class SvLexer extends Lexer {
       macroDepth: this.macroDepth + 1,
       callSite: site,
       includeStack: this.includeStack,
+      diagnostics: this.diagnostics,
+      expansionBudget: this.expansionBudget,
     }).tokenize();
     expansion.pop();
-    this.output.push(...expansion);
+    for (let token of expansion) {
+      this.output.push(token);
+    }
+  }
+  checkMacroArguments(name, macro, args, line, column) {
+    if (args.length > Math.max(macro.params.length, 1)) {
+      this.addLexerError(`Macro '${name}' takes ${macro.params.length} argument(s) but is given ${args.length}`, line, column);
+      return;
+    }
+    let missing = macro.params.slice(args.length).find((param) => param.defaultValue === undefined);
+    if (missing) {
+      this.addLexerError(`Macro '${name}' is missing argument '${missing.name}'`, line, column);
+    }
   }
   substituteMacroArguments(macro, args) {
     let values = new Map();
@@ -420,6 +562,16 @@ export class SvLexer extends Lexer {
       return;
     }
     let included = this.includeResolver?.(name, this.fileUri);
+    if (this.includeResolver && !included) {
+      this.hasUnresolvedInclude = true;
+      let span = this.callSite ?? this.spanForRange(line, column, this.line, this.column);
+      this.diagnostics.push({
+        message: `Cannot find include file '${name}'; its macros and declarations are unknown here`,
+        severity: "warning",
+        code: "SYNTAX-INCLUDE-NOT-FOUND",
+        span,
+      });
+    }
     if (!included || this.includeStack.includes(included.uri)) {
       return;
     }
@@ -430,9 +582,13 @@ export class SvLexer extends Lexer {
       macroDepth: this.macroDepth + 1,
       callSite: site,
       includeStack: [...this.includeStack, included.uri],
+      diagnostics: this.diagnostics,
+      expansionBudget: this.expansionBudget,
     }).tokenize();
     tokens.pop();
-    this.output.push(...tokens);
+    for (let token of tokens) {
+      this.output.push(token);
+    }
   }
   spanForRange(startLine, startColumn, endLine, endColumn) {
     return makeSpan(this.fileUri, startLine, startColumn, endLine, endColumn);
@@ -469,7 +625,11 @@ export class SvLexer extends Lexer {
     for (; !this.isAtEnd() && this.isAlphaNumericOrUnderscore(this.peek());) {
       text += this.advance();
     }
-    return this.createToken(SV_KEYWORDS.has(text) ? text : "Identifier", text, line, column);
+    let isKeyword = SV_KEYWORDS.has(text);
+    if (isKeyword && this.legacyKeywords[this.legacyKeywords.length - 1] && !KEYWORD_SET.has(text)) {
+      isKeyword = false;
+    }
+    return this.createToken(isKeyword ? text : "Identifier", text, line, column);
   }
   scanNumberLiteral(line, column) {
     let text = "";

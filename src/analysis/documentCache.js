@@ -1,5 +1,5 @@
 import { SemanticAnalyzer } from "./semanticAnalyzer.js";
-import { parseSource } from "../parser/sourceParser.js";
+import { isSystemVerilogPath, parseSource } from "../parser/sourceParser.js";
 
 const MAX_CACHED_DOCUMENTS = 32;
 
@@ -15,6 +15,23 @@ export class DocumentCache {
       return value;
     }
   }
+  analyzeSafely(ast, uri, parserDiagnostics) {
+    try {
+      return this.analyzer.analyze(ast);
+    } catch (error) {
+      if (!isSystemVerilogPath(uri) || !(error instanceof RangeError)) {
+        throw error;
+      }
+      parserDiagnostics.push({
+        message: "This file is nested too deeply to analyze",
+        severity: "error",
+        code: "SYNTAX-TOO-DEEP",
+        span: ast.span,
+      });
+      ast.modules = [];
+      return this.analyzer.analyze(ast);
+    }
+  }
   analyze(d, m, k) {
     let value = this.get(d, m, k);
     if (value) {
@@ -27,7 +44,7 @@ export class DocumentCache {
       d,
       this.analyzer.moduleResolver,
     );
-    let { symbolTable: R, diagnostics: J } = this.analyzer.analyze(parse);
+    let { symbolTable: R, diagnostics: J } = this.analyzeSafely(parse, d, parserDiagnostics);
     let X = {
       uri: d,
       version: m,

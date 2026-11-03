@@ -80,13 +80,21 @@ The language follows the file extension: `.sv` and `.svh` are parsed as IEEE 180
 | **Accepted without false errors, not drawn** | Classes (shown in the outline), assertions, properties, sequences, covergroups, `program` bodies drawn as modules, `clocking`, `fork`/`join`, dynamic arrays and queues, DPI imports |
 | **Preprocessor** | `` `define `` with arguments and line continuation, `` `include ``, `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `undef `` |
 
+SystemVerilog files also get checks the Verilog path does not have: unknown types, struct and interface members, and package members; instance ports, parameters and `.*` connections; task and function calls; duplicate declarations; constant expressions; `enum` values; end labels; `always_ff` and `always_comb` rules; and who may drive a variable (IEEE 1800 6.5 and 9.2.2). An unknown name on an `assign` target or port connection is an implicit net with a warning, or an error under `` `default_nettype none ``. Anything that could depend on a file the extension cannot read stays quiet.
+
+Tested against [sv-tests](https://github.com/chipsalliance/sv-tests) by comparing each file's errors with its `:should_fail_because:` marker, using a local script rather than the project's runner: 997 of 1,028 files match, and all 949 valid files are accepted. The other 31 are invalid files that are not reported, mostly the class and constraint rules listed below.
+
 Known limits:
 
+- Class bodies, constraints and `randsequence` productions are skipped rather than analyzed, so mistakes inside them are not reported.
+- Assertion, property and sequence bodies are skipped too, so mistakes inside them are not reported.
+- Assignment widths are not checked as errors, including streaming operators wider than their target.
 - A generate `for` loop is drawn as one copy of its body, not one copy per iteration.
 - A generate `if` or `case` with a constant condition uses its parameters' default values, so instance parameter overrides do not select a different branch. If the condition cannot be evaluated, all branches are kept.
 - Struct members have no hover of their own; hovering the signal shows its type and total width.
 - Macros defined outside the file and its `` `include `` chain cannot be expanded. They are left unjudged, not reported as errors.
-- Names following an import of a package that cannot be found are also left unjudged; the import itself gets a warning.
+- Names following an import of a package that cannot be found are also left unjudged; the import itself gets a warning. UVM is not bundled, so `import uvm_pkg::*` warns unless UVM is in the workspace.
+- There is no `.f` file, `+incdir` or `+define` support.
 - Hierarchical references and class members are accepted but not checked.
 
 ### 3. Automated Quick Fixes (`Ctrl + .`)

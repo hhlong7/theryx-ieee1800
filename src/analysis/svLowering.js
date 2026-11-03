@@ -11,6 +11,7 @@ import {
   describeType,
   findPackage,
 } from "./svTypes.js";
+import { SvChecker } from "./svChecks.js";
 
 const NET_KEYWORDS = new Set([
   "wire", "tri", "tri0", "tri1", "wand", "wor", "triand", "trior", "trireg", "supply0", "supply1",
@@ -64,9 +65,27 @@ class PackageScope extends SvScope {
     this.name = node.name;
     this.node = node;
   }
-  // A package only re-exports what it declares itself, not what it imports.
+  // A package re-exports only what it declares itself and what it names in `export`.
   lookupExported(name, table) {
-    return this[table].get(name);
+    let own = this[table].get(name);
+    if (own) {
+      return own;
+    }
+    for (let { packageName, item } of this.exports ?? []) {
+      if (item !== "*" && item !== name) {
+        continue;
+      }
+      let sources = packageName === "*" ? this.wildcardImports : [this.parent.findPackage(packageName)];
+      for (let source of sources) {
+        if (source && source !== this) {
+          let hit = source.lookupExported(name, table);
+          if (hit) {
+            return hit;
+          }
+        }
+      }
+    }
+    return undefined;
   }
 }
 
@@ -77,7 +96,7 @@ class UnitScope extends SvScope {
     this.lowering = lowering;
   }
   findPackage(name) {
-    return this.lowering.getPackage(name);
+    return name === "$unit" ? this : this.lowering.getPackage(name);
   }
 }
 
@@ -93,6 +112,8 @@ class Lowering {
   currentImported;
   currentOpenScope = false;
   currentFunction;
+  unitsInProgress = new Set();
+  siblingCache = new Map();
   constructor(ast, options) {
     this.ast = ast;
     this.options = options;
@@ -105,7 +126,8 @@ class Lowering {
     for (let item of this.ast.unitItems) {
       this.registerDeclarations(item, this.unitScope, { synthetic: true });
     }
-    this.ast.modules = this.ast.modules.map((node) => this.lowerModule(node));
+    this.diagnostics.push(...new SvChecker(this.ast, this).run());
+    this.ast.modules = this.ast.modules.map((node) => this.siblingCache.get(node) ?? this.lowerModule(node));
     return this.diagnostics;
   }
   getPackage(name) {
@@ -130,6 +152,9 @@ class Lowering {
     this.packages.set(node.name, scope);
     for (let item of node.items) {
       this.registerDeclarations(item, scope, { synthetic: true, packageName: node.name });
+      if (item.kind === "ExportDeclaration") {
+        (scope.exports ??= []).push(...item.exports);
+      }
     }
     return scope;
   }
@@ -251,24 +276,81 @@ class Lowering {
   // ---- Modules
 
   lowerModule(node) {
+    this.unitsInProgress.add(node);
     let scope = new SvScope(this.unitScope);
     this.currentModuleScope = scope;
     this.currentImported = new Map();
     this.currentOpenScope = false;
     let flat = this.flattenItems(node.items, scope, new Set());
-    let items = [];
+    let items = this.declareImplicitNets(flat, scope, node);
     let portNames = node.portNames ? [...node.portNames] : undefined;
     for (let item of flat) {
       this.lowerItem(item, scope, items, node, portNames);
     }
-    return {
+    let lowered = {
       ...node,
       items,
       portNames,
       svModports: flat.filter((item) => item.kind === "ModportDeclaration").flatMap((item) => item.modports),
       svImportedSymbols: [...this.currentImported.values()],
       svOpenScope: this.currentOpenScope || undefined,
+      svDeclaredNames: declaredNames(flat),
     };
+    this.unitsInProgress.delete(node);
+    return lowered;
+  }
+  // IEEE 1800 6.10: an unknown name on an assign target or a port connection declares a wire.
+  declareImplicitNets(flat, scope, node) {
+    if (this.defaultNettypeAt(node) === "none" || this.currentOpenScope || this.ast.svUnresolvedSource) {
+      return [];
+    }
+    let nets = [];
+    let consider = (expr) => {
+      if (expr?.kind === "Concatenation") {
+        expr.elements?.forEach(consider);
+        return;
+      }
+      if (expr?.kind !== "Identifier" || expr.name.startsWith("`") || scope.lookup(expr.name)) {
+        return;
+      }
+      scope.signals.set(expr.name, { layout: { elementWidth: 1, width: 1, packed: [], unpacked: [] } });
+      this.diagnostics.push({
+        message: `'${expr.name}' is not declared, so it becomes an implicit 1-bit net`,
+        severity: "warning",
+        span: expr.span,
+        code: "SEM-IMPLICIT-NET",
+      });
+      nets.push({
+        kind: "NetDeclaration",
+        netType: "wire",
+        identifiers: [{ kind: "Identifier", name: expr.name, span: expr.span }],
+        svImplicit: true,
+        span: expr.span,
+      });
+    };
+    for (let item of flat) {
+      if (item.kind === "ContinuousAssign") {
+        consider(item.lhs);
+      } else if (item.kind === "InstanceDeclaration") {
+        item.portConnections.forEach((connection) => {
+          if (!connection.implicit) {
+            consider(connection.expression);
+          }
+        });
+      } else if (item.kind === "GateInstantiation") {
+        item.instances.forEach((instance) => instance.terminals.forEach(consider));
+      }
+    }
+    return nets;
+  }
+  defaultNettypeAt(node) {
+    let current = "wire";
+    for (let change of this.ast.svDefaultNettypes ?? []) {
+      if (change.line <= node.span.start.line) {
+        current = change.value;
+      }
+    }
+    return current;
   }
   // Generate constructs become plain module items: known conditions pick their branch,
   // unknown conditions keep all branches, loops contribute one copy of the body.
@@ -438,6 +520,13 @@ class Lowering {
       this.lowerInterfacePort(item, scope, out, portNames);
       return;
     }
+    if (item.dataType?.base === "named" && !item.dataType.scope && !scope.lookupType(item.dataType.name)) {
+      // `module m(bus_if port)` looks like a port of a named type until the interface is found.
+      if (this.findInterface(item.dataType.name)) {
+        this.lowerInterfacePort({ ...item, interfaceRef: { name: item.dataType.name } }, scope, out, portNames);
+        return;
+      }
+    }
     let layout = this.portLayout(item, scope);
     let declared = describeType(item.dataType);
     out.push({
@@ -469,6 +558,7 @@ class Lowering {
     let entry = scope.signals.get(identifier.name);
     if (entry) {
       entry.interfaceSignals = signals;
+      entry.interfaceDefinition = definition;
     }
     let index = portNames?.indexOf(identifier.name) ?? -1;
     let flatNames = [];
@@ -500,8 +590,18 @@ class Lowering {
     let matches = (node) => node?.name === name && (!designUnit || node.designUnit === designUnit);
     let local = this.ast.modules.find(matches);
     if (local) {
+      if (local.svModports) {
+        return local;
+      }
+      // Recursive instantiation is legal; a unit still being lowered has no usable ports yet.
+      if (this.unitsInProgress.has(local)) {
+        return undefined;
+      }
       // Modules are lowered in order; a later definition in the same file is lowered on demand.
-      return local.svModports ? local : this.lowerSibling(local);
+      if (!this.siblingCache.has(local)) {
+        this.siblingCache.set(local, this.lowerSibling(local));
+      }
+      return this.siblingCache.get(local);
     }
     let found = this.options.resolver?.resolveModule(name, this.options.fileUri);
     return found?.found && matches(found.moduleNode) ? found.moduleNode : undefined;
@@ -928,6 +1028,10 @@ class Lowering {
     }
     switch (expr.kind) {
       case "Identifier":
+        // An interface has no net of its own: passing the whole instance is not a signal read.
+        if (scope.lookup(expr.name)?.entry?.interfaceSignals) {
+          return { kind: "OpaqueExpression", text: expr.name, span: expr.span };
+        }
         this.noteIdentifier(expr, scope);
         return expr;
       case "ScopedIdentifier":
@@ -1112,6 +1216,7 @@ class Lowering {
     }
     let layout = typeOf(expr.target, scope);
     let member = layout?.members?.get(expr.member);
+    this.reportUnknownMember(expr, layout, member, scope);
     let target = this.lowerExpr(expr.target, scope);
     if (member && member.offset !== undefined && member.layout?.width !== undefined) {
       let slice = this.sliceOf(target, member.offset, member.layout.width, expr.span);
@@ -1121,6 +1226,30 @@ class Lowering {
     }
     // Hierarchical reference, class member or an unresolved type: keep the name without judging it.
     return { kind: "OpaqueExpression", text: flatName ?? expr.member, inner: target, span: expr.span };
+  }
+  reportUnknownMember(expr, layout, member, scope) {
+    if (member) {
+      return;
+    }
+    if (layout?.members && layout.packed.length === 0 && layout.unpacked.length === 0 && !layout.unresolved) {
+      this.diagnostics.push({
+        message: `'${layout.typeName ?? "struct"}' has no member '${expr.member}'`,
+        severity: "error",
+        span: expr.memberSpan ?? expr.span,
+        code: "SEM-UNKNOWN-MEMBER",
+      });
+      return;
+    }
+    let base = expr.target?.kind === "Identifier" ? scope.lookup(expr.target.name) : undefined;
+    let definition = base?.kind === "signal" ? base.entry.interfaceDefinition : undefined;
+    if (definition?.svDeclaredNames && !definition.svDeclaredNames.includes(expr.member)) {
+      this.diagnostics.push({
+        message: `Interface '${definition.name}' has no member '${expr.member}'`,
+        severity: "error",
+        span: expr.memberSpan ?? expr.span,
+        code: "SEM-UNKNOWN-MEMBER",
+      });
+    }
   }
   lowerSystemCall(expr, scope) {
     let value = evalConst(expr, scope);
@@ -1304,6 +1433,36 @@ function expandInterfaceConnection(connection, localName, child) {
       },
       span: connection.span,
     }));
+}
+
+// Every name a design unit declares, for `port.member` checks from other units.
+function declaredNames(items) {
+  let names = [];
+  for (let item of items) {
+    switch (item.kind) {
+      case "DataDeclaration":
+        names.push(...item.declarators.map((declarator) => declarator.name));
+        break;
+      case "PortDeclaration":
+      case "GenvarDeclaration":
+        names.push(...item.identifiers.map((identifier) => identifier.name));
+        break;
+      case "ParameterDeclaration":
+        names.push(...item.parameters.map((parameter) => parameter.name));
+        break;
+      case "ModportDeclaration":
+        names.push(...item.modports.map((modport) => modport.name));
+        break;
+      case "InstanceDeclaration":
+        names.push(item.instanceName);
+        break;
+      default:
+        if (item.name) {
+          names.push(item.name);
+        }
+    }
+  }
+  return names;
 }
 
 export function lowerSourceFile(ast, options = {}) {

@@ -165,8 +165,27 @@ export class ModuleResolver {
     }
     return { found: false };
   }
+  // Whether some other workspace file seems to declare this type, without parsing the workspace.
+  workspaceDeclaresType(d, m) {
+    let normalizeToFilePath = this.normalizeToFilePath(m);
+    if (!normalizeToFilePath) {
+      return false;
+    }
+    let escaped = escapeRegExp(d);
+    let pattern = new RegExp(
+      `\\b(?:class|interface|module|program|checker|covergroup|package)\\s+(?:(?:static|automatic)\\s+)?(?:class\\s+)?${escaped}\\b` +
+        `|\\btypedef\\b[^;]*\\b${escaped}\\s*(?:\\[[^;]*)?;|\\}\\s*${escaped}\\s*(?:\\[[^;]*)?;|\\bnettype\\b[^;]*\\b${escaped}\\s*;`,
+    );
+    let dirname = path.dirname(normalizeToFilePath);
+    for (let dir of [dirname, ...this.searchRoots]) {
+      if (this.findFileMatching(dir, pattern, `${d}.sv`, normalizeToFilePath)) {
+        return true;
+      }
+    }
+    return false;
+  }
   // Breadth-first walk of SystemVerilog sources, trying the conventional file name first.
-  findFileMatching(d, m, k) {
+  findFileMatching(d, m, k, skipPath) {
     let queue = [{ dir: d, depth: 0 }];
     let visited = 0;
     for (; queue.length > 0 && visited < MAX_SCAN_ENTRIES;) {
@@ -179,6 +198,9 @@ export class ModuleResolver {
       let ordered = [...dirEntries].sort((a, b) => (b === k ? 1 : 0) - (a === k ? 1 : 0));
       for (let dirEntry of ordered) {
         let filePath = path.join(dir, dirEntry);
+        if (filePath === skipPath) {
+          continue;
+        }
         if (/\.(sv|svh)$/i.test(dirEntry)) {
           try {
             if (m.test(fs.readFileSync(filePath, "utf-8"))) {

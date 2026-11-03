@@ -1,5 +1,7 @@
 import { baseIdentifier } from "../lint/rtlCheckers.js";
 
+const MAX_DRAWN_REPLICATION = 4096;
+
 export class ExpressionElaborator {
   nodes = [];
   connections = [];
@@ -627,6 +629,12 @@ export class ExpressionElaborator {
           m = Math.max(1, int);
         }
       }
+    }
+    if (m > MAX_DRAWN_REPLICATION) {
+      return this.createUnsupportedSource(
+        `{${m}{...}}`,
+        `Replication of ${m} copies is too large to draw in the schematic`,
+      );
     }
     let k = [];
     for (let X = 0; X < m; X++) {

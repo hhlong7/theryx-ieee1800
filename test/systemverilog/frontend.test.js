@@ -38,8 +38,12 @@ describe("real errors are still reported", () => {
   it("undeclared identifier on the right-hand side", () => {
     expect(codes(analyzeText(wrap("assign q = missing;")).errors)).toContain("SEM-UNDECLARED");
   });
-  it("undeclared identifier on the left-hand side", () => {
-    expect(codes(analyzeText(wrap("assign missing = 4'd0;")).errors)).toContain("SEM-UNDECLARED-LHS");
+  it("undeclared identifier on the left-hand side with `default_nettype none", () => {
+    let text = "`default_nettype none\n" + wrap("assign missing = 4'd0;");
+    expect(codes(analyzeText(text).errors)).toContain("SEM-UNDECLARED-LHS");
+  });
+  it("undeclared assign target is an implicit net by default", () => {
+    expect(codes(analyzeText(wrap("assign missing = 4'd0;")).errors)).toContain("SEM-IMPLICIT-NET");
   });
   it("undeclared identifier in always_ff", () => {
     expect(codes(analyzeText(wrap("always_ff @(posedge clk) q <= missing;")).errors)).toContain("SEM-UNDECLARED");
@@ -179,7 +183,9 @@ describe("preprocessor", () => {
   });
   it("leaves unknown macros unjudged", () => {
     let text = "module m (output logic [3:0] q);\nassign q = `UNDEFINED_ELSEWHERE;\nendmodule\n";
-    expect(analyzeText(text).errors).toEqual([]);
+    let found = analyzeText(text).errors;
+    expect(codes(found)).toEqual(["SYNTAX-UNDEFINED-MACRO"]);
+    expect(found[0].severity).toBe("warning");
   });
 });
 
@@ -232,4 +238,101 @@ describe("testbench detection", () => {
     let text = "module cpu (input clk);\nalways @(posedge clk) $fatal;\nendmodule\n";
     expect(detectTestbench(text, "/x/cpu.v").isTestbench).toBe(true);
   });
+});
+
+describe("hostile input stays harmless", () => {
+  it("a malformed foreach header does not hang", () => {
+    let text = "module m; initial begin foreach a; foreach (b[); foreach (c[1,2]) ; end endmodule\n";
+    expect(analyzeText(text).errors.length).toBeGreaterThan(0);
+  });
+  it("recursive and mutually recursive instantiation is legal", () => {
+    expect(codes(analyzeText("module m #(parameter int N=2)(input logic a); if (N>0) begin : g m #(N-1) u(.*); end endmodule\n").errors)).toEqual([]);
+    expect(codes(analyzeText("module a(input x); b u(.*); endmodule\nmodule b(input x); a u(.*); endmodule\n").errors)).toEqual([]);
+  });
+  it("a macro bomb stops at the expansion limit", () => {
+    let defines = Array.from({ length: 40 }, (_, i) => `\`define M${i} \`M${i + 1} \`M${i + 1}\n`).join("");
+    let result = analyzeText(`${defines}\`define M40 1\nmodule m; logic a = \`M0; endmodule\n`);
+    expect(codes(result.errors).some((code) => code === "SYNTAX-PREPROCESSOR")).toBe(true);
+  });
+  it("absurd nesting is reported rather than thrown", () => {
+    let text = `module m; ${"if (1) begin ".repeat(50000)}${"end ".repeat(50000)}endmodule\n`;
+    expect(codes(analyzeText(text).errors)).toContain("SYNTAX-TOO-DEEP");
+  });
+  it("a scope operator after a number is a syntax error", () => {
+    let text = "module m; int a; initial for (int i = 0; i < 2 :: ; i++) a = i; endmodule\n";
+    expect(codes(analyzeText(text).errors)).toContain("SYNTAX-SCOPE");
+  });
+  it("diagnostics are capped", () => {
+    let text = `module m; ${"end ".repeat(5000)}endmodule\n`;
+    expect(analyzeText(text).errors.length).toBeLessThanOrEqual(600);
+  });
+});
+
+describe("IEEE 1800 semantic checks", () => {
+  const rejected = {
+    "SEM-UNKNOWN-TYPE": "module m; foo_t x; endmodule",
+    "SEM-UNKNOWN-MEMBER": "module m; typedef struct packed {logic a;} s_t; s_t s; assign s.nope = 1; endmodule",
+    "SEM-UNKNOWN-PACKAGE-MEMBER": "package p; parameter int A=1; endpackage\nmodule m; logic [p::NOPE:0] a; endmodule",
+    "SEM-UNKNOWN-PACKAGE": "module m; logic [q::A:0] a; endmodule",
+    "SEM-DUPLICATE-DECLARATION": "module m; typedef enum {A,A} e; endmodule",
+    "SEM-UNKNOWN-PORT": "module c(input a); endmodule\nmodule m; c u(.b(1)); endmodule",
+    "SEM-TOO-MANY-CONNECTIONS": "module c(input a); endmodule\nmodule m; c u(1,2); endmodule",
+    "SEM-UNKNOWN-PARAMETER": "module c #(parameter int P=1)(); endmodule\nmodule m; c #(.Q(1)) u(); endmodule",
+    "SEM-IMPLICIT-CONNECTION": "module c(input a); endmodule\nmodule m; c u(.*); endmodule",
+    "SEM-UNKNOWN-MODPORT": "interface i; logic a; modport mp(input a); endinterface\nmodule m(i.nope p); endmodule",
+    "SEM-MODPORT-SIGNAL": "interface i; logic a; modport mp(input z); endinterface\nmodule m; endmodule",
+    "SEM-MULTIPLE-DRIVERS": "module m(input logic c); logic a; always_ff @(posedge c) a<=1; always_ff @(posedge c) a<=0; endmodule",
+    "SEM-ASSIGN-CONSTANT": "module m; parameter int P=1; assign P = 2; endmodule",
+    "SEM-NOT-CONSTANT": "module m; int n; logic [n:0] a; endmodule",
+    "SEM-JUMP": "module m; initial break; endmodule",
+    "SEM-RETURN": "module m; initial return; endmodule",
+    "SEM-CALL-ARGUMENTS": "module m; function int f(int a); return a; endfunction int x = f(1,2); endmodule",
+    "SEM-UNDECLARED-SUBROUTINE": "module m; int x = nofn(1); endmodule",
+    "SEM-TASK-IN-FUNCTION": "module m; task t(); endtask function void f(); t(); endfunction endmodule",
+    "SEM-TIMING-CONTROL": "module m; logic a,b; always_comb @(posedge b) a = 1; endmodule",
+    "SEM-ENUM-VALUE": "module m; typedef enum logic {A=2} e; endmodule",
+    "SEM-ENUM-ASSIGN": "module m; typedef enum {A,B} e; e x; initial x = 1; endmodule",
+    "SEM-GENVAR": "module m; for (i=0;i<2;i++) begin end endmodule",
+    "SEM-REAL-SELECT": "module m; real r; logic a; assign a = r[0]; endmodule",
+    "SEM-PORT-NOT-DECLARED": "module m(a); endmodule",
+    "SEM-UNDECLARED-IDENTIFIER": "package p; parameter int A = NOPE; endpackage\nmodule m; endmodule",
+    "SYNTAX-END-LABEL": "module m; endmodule : n",
+    "SYNTAX-NUMBER": "module m; logic [3:0] a = 4'b12; endmodule",
+    "SYNTAX-STRING": 'module m; string s = "abc\n; endmodule',
+    "SYNTAX-PREPROCESSOR": "`endif\nmodule m; endmodule",
+  };
+  for (let [code, text] of Object.entries(rejected)) {
+    it(`reports ${code}`, () => {
+      expect(codes(analyzeText(`${text}\n`).errors)).toContain(code);
+    });
+  }
+  const accepted = {
+    "parameterized class scope": "class c #(type T=int); static function T g(); return 0; endfunction endclass\nmodule m; int x = c#(int)::g(); endmodule",
+    "array method with": "module m; int a[3]; int b[$]; initial begin b = a.find(x) with (x>0); b = a.find with (item>0); end endmodule",
+    "randsequence": "module m; initial randsequence(main) main: a; a: {}; endsequence endmodule",
+    "out-of-block constraint": "class c; rand int b; extern constraint k; endclass\nconstraint c::k { b == 0; }\nmodule m; endmodule",
+    "interface class": "interface class i; endclass\nmodule m; endmodule",
+    "deferred assertion in a module": "module m; logic a; assert #0 (a); assert final (a); endmodule",
+    "tagged pattern": "module m; typedef union tagged {void N; int V;} u_t; u_t t; int r; initial if (t matches tagged V .v) r = v; endmodule",
+    "enum ranges": "module m; typedef enum {A[3], B[2:4]} e; e x = A0; e y = B2; endmodule",
+    "package export": "package a; int v; endpackage\npackage b; import a::*; export a::*; endpackage\nmodule m; import b::*; assign v = 1; endmodule",
+    "$unit type": "typedef logic t;\nmodule m; $unit::t a; endmodule",
+    "user-defined primitive": "primitive u(output y, input a); table 0 : 1; 1 : 0; endtable endprimitive\nmodule m; logic a,b; u g(b,a); endmodule",
+    "nested module": "module m; module n; endmodule n u(); endmodule",
+    "signal named after its module": "module test; logic test; endmodule",
+    "writing a subroutine input": "module m; task t(int a); a = 1; endtask endmodule",
+    "statement label on a block": "module m; initial name: begin end : name endmodule",
+    "fork join_none in a function": "module m; function void f(); fork #1; join_none endfunction endmodule",
+    "forward typedef": "module m; typedef struct s_t; typedef struct packed {logic a;} s_t; s_t v; endmodule",
+    "begin_keywords": '`begin_keywords "1364-2001"\nmodule m; reg logic; endmodule\n`end_keywords',
+    "escaped identifier": "`default_nettype none\nmodule m; reg \\cpu3 ; wire r; assign r = cpu3; endmodule",
+    "interface passed as an argument": "interface i; logic a; endinterface\nmodule m; i x(); function void f(virtual i p); endfunction initial f(x); endmodule",
+    "byte order mark": "\ufeffmodule m; endmodule",
+  };
+  for (let [name, text] of Object.entries(accepted)) {
+    it(`accepts ${name}`, () => {
+      let errors = analyzeText(`${text}\n`).errors.filter((diagnostic) => diagnostic.severity === "error");
+      expect(errors.map((diagnostic) => diagnostic.message)).toEqual([]);
+    });
+  }
 });

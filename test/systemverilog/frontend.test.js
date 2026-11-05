@@ -336,3 +336,21 @@ describe("IEEE 1800 semantic checks", () => {
     });
   }
 });
+
+describe("Windows line endings", () => {
+  let stringErrors = (text) => codes(analyzeText(text).errors).filter((code) => code === "SYNTAX-STRING");
+
+  it("accepts a string continued with a backslash", () => {
+    let text = 'module m;\r\n  string s = "a \\\r\n    b";\r\nendmodule\r\n';
+    expect(analyzeText(text).errors.filter((diagnostic) => diagnostic.severity === "error")).toEqual([]);
+  });
+
+  it("accepts a string continued with a backslash in a Verilog file", () => {
+    let text = 'module m;\r\n  initial $display("a \\\r\n    b");\r\nendmodule\r\n';
+    expect(analyzeText(text, "inline.v").errors.filter((diagnostic) => diagnostic.severity === "error")).toEqual([]);
+  });
+
+  it("still rejects a string broken by a bare line ending", () => {
+    expect(stringErrors('module m;\r\n  string s = "abc\r\n;\r\nendmodule\r\n')).toEqual(["SYNTAX-STRING"]);
+  });
+});

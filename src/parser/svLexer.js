@@ -151,7 +151,7 @@ export class SvLexer extends Lexer {
   }
   checkLiteral(token) {
     if (token.type === "StringLiteral") {
-      let text = token.text;
+      let text = token.text.replace(/\r\n?/g, "\n");
       if (text.length < 2 || !text.endsWith('"') || /(^|[^\\])\n/.test(text)) {
         this.diagnostics.push({ message: "Unterminated string literal", severity: "error", code: "SYNTAX-STRING", span: this.callSite ?? token.span });
       }

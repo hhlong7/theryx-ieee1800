@@ -562,6 +562,9 @@ export class Lexer {
             E += peekNext;
             break;
         }
+        if (peekNext === "\r" && this.peek() === "\n") {
+          k += this.advance();
+        }
         continue;
       }
       if (

@@ -1,0 +1,22 @@
+{
+  "$schema": "./rules.schema.json",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "THERYX-RTL-1",
+      "name": "Always Block Requires Timing Control",
+      "enabled": true,
+      "severity": "error",
+      "checker": "theryx-rtl-1-always-control",
+      "description": "An 'always' block without an event control (@) and without a delay control (#) is legal IEEE 1364 but has no meaning as RTL: it maps to no hardware and, in simulation, it forms a zero-delay infinite loop that never advances time."
+    },
+    {
+      "id": "THERYX-RTL-2",
+      "name": "No Simulation-Only Always in RTL",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "theryx-rtl-2-delay-always-rtl",
+      "description": "A delay-controlled 'always' (e.g. a clock generator) is a simulation construct: it is not synthesizable and belongs in a testbench, not in RTL. Testbench files are exempt via testbench detection."
+    }
+  ]
+}

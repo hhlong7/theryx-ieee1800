@@ -1,0 +1,7 @@
+src/**
+test/**
+node_modules/**
+.gitignore
+vitest.config.*
+*.vsix
+syntaxes/tmLanguage.schema.json.bak

@@ -1,0 +1,113 @@
+{
+  "$schema": "./rules.schema.json",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "STARC-2.1.1",
+      "name": "No Mixed Assignments in Always",
+      "enabled": true,
+      "severity": "error",
+      "checker": "starc-2-1-1-mixed-assignments",
+      "description": "Do not mix blocking (=) and non-blocking (<=) assignments inside the same always block to prevent simulation/synthesis race conditions."
+    },
+    {
+      "id": "STARC-2.1.2",
+      "name": "Correct Assignment Operator by Always Type",
+      "enabled": true,
+      "severity": "error",
+      "checker": "starc-2-1-2-assignment-type",
+      "description": "Use non-blocking assignments (<=) for sequential always blocks and blocking assignments (=) for combinational always @(*) blocks."
+    },
+    {
+      "id": "STARC-2.3.1",
+      "name": "Case Default Clause Required",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-2-3-1-case-default",
+      "description": "Always specify a 'default' clause in 'case' statements to prevent latch inference and cover undefined states."
+    },
+    {
+      "id": "STARC-1.1.1",
+      "name": "Clock and Reset Naming Conventions",
+      "enabled": true,
+      "severity": "info",
+      "checker": "starc-1-1-1-naming-conventions",
+      "description": "Follow STARC naming conventions for clock signals (prefix 'clk') and active-low reset signals (suffix '_n').",
+      "params": {
+        "clockPattern": "^(clk|clock)(_[a-zA-Z0-9]+)?$",
+        "resetPattern": "^(rst|reset)(_[a-zA-Z0-9]+)?_n$"
+      }
+    },
+    {
+      "id": "RMM-2.2",
+      "name": "Named Port Connections in Submodules",
+      "enabled": true,
+      "severity": "error",
+      "checker": "rmm-2-2-named-port-connections",
+      "description": "Prohibit positional port connections in submodule instances; all port connections must be explicit and named: .port_name(net_name)."
+    },
+    {
+      "id": "STARC-1.2.1",
+      "name": "Module Name Matches File Name",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-1-2-1-module-filename",
+      "description": "The module name must match the base name of the Verilog source file (.v or .vh)."
+    },
+    {
+      "id": "STARC-1.2.2",
+      "name": "Single Module per File",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-1-2-2-single-module",
+      "description": "Define only one module per file to maintain modularity and reusability (STARC/RMM)."
+    },
+    {
+      "id": "STARC-1.1.2",
+      "name": "Parameter Naming Conventions",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-1-1-2-parameter-naming",
+      "description": "Follow STARC naming conventions for parameters and localparams (uppercase with underscores: ^[A-Z0-9_]+$).",
+      "params": {
+        "pattern": "^[A-Z0-9_]+$"
+      }
+    },
+    {
+      "id": "STARC-2.2.1",
+      "name": "Incomplete Combinational Sensitivity List",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-2-2-1-incomplete-sensitivity",
+      "description": "Combinational always blocks must list all read signals in their sensitivity list (or use @*) to prevent simulation-synthesis mismatches."
+    },
+    {
+      "id": "STARC-3.1.1",
+      "name": "Bus Bit-Width Mismatch",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-3-1-1-bitwidth-mismatch",
+      "description": "Detect bit-width mismatches between left-hand side and right-hand side in continuous and procedural assignments according to IEEE 1364.",
+      "params": {
+        "allowUnsizedLiterals": false,
+        "allowArithmeticBitGrowth": false
+      }
+    },
+    {
+      "id": "RMM-2.3",
+      "name": "Unconnected Ports in Submodule Instances",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "rmm-2-3-unconnected-ports",
+      "description": "Warn about unconnected submodule input ports (floating inputs) and inform about unconnected output ports."
+    },
+    {
+      "id": "STARC-Latch",
+      "name": "No Inferred Latch in Combinational Logic",
+      "enabled": true,
+      "severity": "warning",
+      "checker": "starc-latch-inference",
+      "description": "Avoid incomplete conditional branches in always @(*) blocks (such as if without else) that infer unwanted hardware latches."
+    }
+  ]
+}

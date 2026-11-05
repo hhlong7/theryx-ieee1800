@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SystemVerilog",
+  "scopeName": "source.systemverilog",
+  "patterns": [
+    {
+      "name": "storage.type.systemverilog",
+      "match": "\\b(bit|byte|chandle|enum|int|logic|longint|shortint|shortreal|string|struct|union|void|typedef|packed|type|var)\\b"
+    },
+    {
+      "name": "keyword.control.systemverilog",
+      "match": "\\b(alias|always_comb|always_ff|always_latch|assert|assume|automatic|before|bind|bins|binsof|break|checker|class|clocking|const|constraint|context|continue|cover|covergroup|coverpoint|cross|dist|do|endchecker|endclass|endclocking|endgroup|endinterface|endpackage|endprogram|endproperty|endsequence|expect|export|extends|extern|final|first_match|foreach|forkjoin|iff|ignore_bins|illegal_bins|implements|import|inside|interconnect|interface|intersect|join_any|join_none|let|local|matches|modport|nettype|new|null|package|priority|program|property|protected|pure|rand|randc|randcase|randsequence|ref|restrict|return|sequence|soft|solve|static|super|tagged|this|throughout|timeprecision|timeunit|unique|unique0|until|virtual|wait_order|wildcard|with|within)\\b"
+    },
+    {
+      "name": "keyword.operator.systemverilog",
+      "match": "(\\+\\+|--|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<<=|>>>=|<<=|>>=|::|->>|\\|->|\\|=>|==\\?|!=\\?|<->|\\+:|-:|\\.\\*)"
+    },
+    {
+      "name": "constant.numeric.systemverilog",
+      "match": "'[01xXzZ]\\b"
+    },
+    {
+      "name": "entity.name.namespace.systemverilog",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_$]*(?=::)"
+    },
+    {
+      "include": "source.verilog"
+    }
+  ]
+}

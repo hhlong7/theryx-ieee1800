@@ -50,6 +50,90 @@ function numericRange(layout, span) {
   return undefined;
 }
 
+// Generate loops with more iterations than this keep a single copy of their body.
+const MAX_GENERATE_ITERATIONS = 256;
+
+// The genvar values a generate `for` takes, or undefined when the loop isn't constant or is too long.
+function generateLoopValues(item, name, scope) {
+  if (item.initExpr?.kind !== "BinaryExpression" || item.initExpr.operator !== "=") {
+    return undefined;
+  }
+  let value = evalConst(item.initExpr.right, scope);
+  let step = item.stepExpr?.kind === "BinaryExpression" && item.stepExpr.operator === "=" ? item.stepExpr.right : undefined;
+  if (value === undefined || !step || !item.condition) {
+    return undefined;
+  }
+  let inner = new SvScope(scope);
+  let values = [];
+  for (; values.length <= MAX_GENERATE_ITERATIONS;) {
+    inner.values.set(name, { name, value });
+    let condition = evalConst(item.condition, inner);
+    if (condition === undefined) {
+      return undefined;
+    }
+    if (!condition) {
+      return values;
+    }
+    values.push(value);
+    let next = evalConst(step, inner);
+    if (next === undefined || next === value) {
+      return undefined;
+    }
+    value = next;
+  }
+  return undefined;
+}
+
+// Names declared directly in a generate body; each iteration gets its own copy, prefixed like `g[0].name`.
+function generateLocalNames(body) {
+  let names = new Set();
+  let items = body?.kind === "GenerateBlockStatement" || body?.kind === "GenerateBlock" ? body.items ?? [] : [];
+  for (let item of items) {
+    if (item.kind === "DataDeclaration") {
+      for (let declarator of item.declarators ?? []) {
+        names.add(declarator.name);
+      }
+    } else if (item.kind === "NetDeclaration" || item.kind === "VariableDeclaration") {
+      for (let identifier of item.identifiers ?? []) {
+        names.add(identifier.name);
+      }
+    }
+  }
+  return names;
+}
+
+// One iteration of a generate loop: the genvar becomes a number, local names and instances get the iteration prefix.
+function unrollGenerateBody(body, genvar, value, prefix) {
+  let locals = generateLocalNames(body);
+  let rename = (name) => (locals.has(name) ? prefix + name : name);
+  // Instances inside a nested generate loop get their full prefix when that loop unrolls.
+  let copy = (node, nested = false) => {
+    if (Array.isArray(node)) {
+      return node.map((child) => copy(child, nested));
+    }
+    if (!node || typeof node !== "object") {
+      return node;
+    }
+    if (node.kind === "Identifier") {
+      return node.name === genvar ? numberLiteral(value, node.span) : { ...node, name: rename(node.name) };
+    }
+    let inner = nested || node.kind === "GenerateLoopStatement";
+    let out = {};
+    for (let key of Object.keys(node)) {
+      out[key] = key === "span" || key.endsWith("Span") ? node[key] : copy(node[key], inner);
+    }
+    if (node.kind === "GenerateLoopStatement" && !nested) {
+      out.svGeneratePrefix = prefix + (node.svGeneratePrefix ?? "");
+    } else if (node.kind === "InstanceDeclaration" && !nested) {
+      out.instanceName = prefix + node.instanceName;
+    } else if (node.kind === "DataDeclaration") {
+      out.declarators = out.declarators?.map((declarator) => ({ ...declarator, name: rename(declarator.name) }));
+    }
+    return out;
+  };
+  return copy(body);
+}
+
 function unpackedRanges(layout, span) {
   let ranges = (layout?.unpacked ?? [])
     .filter((dim) => dim.count !== undefined)
@@ -60,6 +144,7 @@ function unpackedRanges(layout, span) {
 class PackageScope extends SvScope {
   name;
   node;
+  functionDecls = new Map();
   constructor(parent, node) {
     super(parent);
     this.name = node.name;
@@ -216,6 +301,8 @@ class Lowering {
       case "TaskDeclaration":
         if (!flags.packageName) {
           scope.signals.set(item.name, {});
+        } else if (item.kind === "FunctionDeclaration") {
+          scope.functionDecls?.set(item.name, item);
         }
         break;
       case "GenvarDeclaration":
@@ -280,6 +367,8 @@ class Lowering {
     let scope = new SvScope(this.unitScope);
     this.currentModuleScope = scope;
     this.currentImported = new Map();
+    let savedFunctions = this.currentImportedFunctions;
+    this.currentImportedFunctions = new Map();
     this.currentOpenScope = false;
     let flat = this.flattenItems(node.items, scope, new Set());
     let items = this.declareImplicitNets(flat, scope, node);
@@ -293,9 +382,11 @@ class Lowering {
       portNames,
       svModports: flat.filter((item) => item.kind === "ModportDeclaration").flatMap((item) => item.modports),
       svImportedSymbols: [...this.currentImported.values()],
+      svImportedFunctions: [...this.currentImportedFunctions.values()].filter(Boolean),
       svOpenScope: this.currentOpenScope || undefined,
       svDeclaredNames: declaredNames(flat),
     };
+    this.currentImportedFunctions = savedFunctions;
     this.unitsInProgress.delete(node);
     return lowered;
   }
@@ -398,7 +489,16 @@ class Lowering {
         out.push(genvar);
       }
     }
-    out.push(...this.flattenItems([item.body], scope, seen, true));
+    let values = loopVar?.kind === "Identifier" ? generateLoopValues(item, loopVar.name, scope) : undefined;
+    if (!values) {
+      out.push(...this.flattenItems([item.body], scope, seen, true));
+      return out;
+    }
+    let label = item.body?.name ?? "genblk";
+    for (let value of values) {
+      let body = unrollGenerateBody(item.body, loopVar.name, value, `${item.svGeneratePrefix ?? ""}${label}[${value}].`);
+      out.push(...this.flattenItems([body], scope, seen, true));
+    }
     return out;
   }
   flattenIf(item, scope, seen) {
@@ -1070,8 +1170,11 @@ class Lowering {
           multiplier: this.lowerBound(expr.multiplier, scope),
           elements: expr.elements.map((element) => this.lowerExpr(element, scope)),
         };
-      case "FunctionCall":
-        return { ...expr, target: undefined, args: expr.args.map((arg) => this.lowerExpr(arg, scope)) };
+      case "FunctionCall": {
+        let lowered = { ...expr, target: undefined, args: expr.args.map((arg) => this.lowerExpr(arg, scope)) };
+        let key = this.importPackageFunction(expr, scope);
+        return key ? { ...lowered, svFunction: key } : lowered;
+      }
       case "SystemFunctionCall":
         return this.lowerSystemCall(expr, scope);
       case "CastExpression":
@@ -1088,6 +1191,32 @@ class Lowering {
       default:
         return expr;
     }
+  }
+  // A call to a package function (`pkg::f()` or an imported `f()`): lowers the function once per module
+  // so the schematic can inline it, and returns its `pkg::f` key.
+  importPackageFunction(expr, scope) {
+    let pkg;
+    if (expr.scope) {
+      pkg = this.getPackage(expr.scope);
+    } else if (!expr.target) {
+      for (let current = scope; current && !pkg; current = current.parent) {
+        if (current.signals.has(expr.name)) {
+          return undefined;
+        }
+        let named = current.namedImports.get(expr.name);
+        pkg = named?.lookupExported?.(expr.name, "functionDecls") ? named : current.wildcardImports.find((candidate) => candidate.lookupExported?.(expr.name, "functionDecls"));
+      }
+    }
+    let item = pkg?.lookupExported?.(expr.name, "functionDecls");
+    if (!item || !this.currentImportedFunctions) {
+      return undefined;
+    }
+    let key = `${pkg.name}::${expr.name}`;
+    if (!this.currentImportedFunctions.has(key)) {
+      this.currentImportedFunctions.set(key, undefined);
+      this.currentImportedFunctions.set(key, { ...this.lowerSubroutine(item, pkg), svKey: key });
+    }
+    return key;
   }
   noteIdentifier(expr, scope) {
     let hit = scope.lookup(expr.name);
@@ -1113,6 +1242,15 @@ class Lowering {
     let operator = expr.operator === "==?" ? "==" : expr.operator === "!=?" ? "!=" : expr.operator;
     if (operator === "->" || operator === "<->") {
       operator = "||";
+    }
+    if (["<<", ">>", "<<<", ">>>", "**"].includes(operator)) {
+      // The right operand of a shift or power is self-determined (IEEE 1800 11.6.1).
+      return {
+        ...expr,
+        operator,
+        left: fitUnsizedLiteral(this.lowerExpr(expr.left, scope, contextWidth), contextWidth),
+        right: this.lowerExpr(expr.right, scope),
+      };
     }
     return {
       ...expr,
@@ -1357,6 +1495,7 @@ function fitUnsizedLiteral(expr, width) {
     expr.kind === "NumberLiteral" &&
     width !== undefined &&
     expr.bitWidth === undefined &&
+    expr.svWidth === undefined &&
     !expr.raw.includes("'") &&
     expr.value >= 0 &&
     (width >= 32 || expr.value < Math.pow(2, width))

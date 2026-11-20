@@ -11,6 +11,7 @@ export class Elaborator {
   elaborateModule(d, m) {
     let moduleScope = m.getModuleScope(d.name);
     let expressionElaborator = new ExpressionElaborator(moduleScope);
+    expressionElaborator.registerDeclarations([...(d.svImportedFunctions ?? []), ...d.items]);
     let alwaysElaborator = new AlwaysElaborator(expressionElaborator);
     let M = new Set();
     let v = new Set();
@@ -53,8 +54,10 @@ export class Elaborator {
         }
       }
     }
+    expressionElaborator.finishContinuousSlices();
     expressionElaborator.resolvePlaceholders();
     this.connectOutputs(d, expressionElaborator, m);
+    expressionElaborator.pruneDeadNodes();
     for (let [R, J] of Array.from(expressionElaborator.signalOutputs.entries())) {
       if (M.has(R) || v.has(R)) {
         continue;
@@ -95,6 +98,7 @@ export class Elaborator {
   elaborateBlock(d, m, k) {
     let moduleScope = k.getModuleScope(m.name);
     let expressionElaborator = new ExpressionElaborator(moduleScope);
+    expressionElaborator.registerDeclarations(m.items);
     let alwaysElaborator = new AlwaysElaborator(expressionElaborator);
     let v = new Set();
     let R = new Set();
@@ -121,27 +125,12 @@ export class Elaborator {
         }
       }
     }
+    expressionElaborator.finishContinuousSlices();
     expressionElaborator.resolvePlaceholders();
     let J = new Set();
     if (d.kind === "ContinuousAssign") {
-      if (d.lhs.kind === "Identifier") {
-        J.add(d.lhs.name);
-      } else if (d.lhs.kind === "BitSelect" || d.lhs.kind === "PartSelect") {
-        let X = baseIdentifier(d.lhs);
-        if (X) {
-          J.add(X.name);
-        }
-      } else if (d.lhs.kind === "Concatenation") {
-        for (let element of d.lhs.elements) {
-          if (element.kind === "Identifier") {
-            J.add(element.name);
-          } else if (element.kind === "BitSelect" || element.kind === "PartSelect") {
-            let Q = baseIdentifier(element);
-            if (Q) {
-              J.add(Q.name);
-            }
-          }
-        }
+      for (let X of alwaysElaborator.lvalueNames(d.lhs)) {
+        J.add(X);
       }
     } else if (d.kind === "AlwaysBlock") {
       for (let X of alwaysElaborator.findAllAssignedVars(d.statement)) {
@@ -302,6 +291,10 @@ export class Elaborator {
         if (item.kind === "PortDeclaration") {
           for (let identifier of item.identifiers) {
             let R = moduleScope.resolve(identifier.name)?.bitWidth ?? 1;
+            let dims = m.arrays.get(identifier.name);
+            if (dims?.length === 1) {
+              R *= dims[0].count;
+            }
             if (item.direction === "input") {
               let nodeId = m.createNodeId(`port_in_${identifier.name}`);
               let X = {
@@ -342,6 +335,16 @@ export class Elaborator {
           for (let identifier of item.identifiers) {
             let R = moduleScope.resolve(identifier.name)?.bitWidth ?? 1;
             let value = m.signalOutputs.get(identifier.name);
+            let dims = m.arrays.get(identifier.name);
+            if (dims?.length === 1 && !m.isMemory(identifier.name)) {
+              let elements = [];
+              for (let k = dims[0].count - 1; k >= 0; k--) {
+                let element = `${identifier.name}[${dims[0].low + k}]`;
+                elements.push(m.signalOutputs.get(element) ?? m.createConstantSource(0, R, `${R}'bx`));
+              }
+              value = m.concatSources(elements, identifier.span);
+              R *= dims[0].count;
+            }
             let nodeId = m.createNodeId(`port_out_${identifier.name}`);
             let Q = {
               id: "in",
@@ -367,6 +370,15 @@ export class Elaborator {
     }
   }
   elaborateInstance(d, m, k, E, C = new Set(), M = new Set()) {
+    if (d.instanceDims?.length === 1) {
+      let copies = this.expandInstanceArray(d, m, k, E);
+      if (copies) {
+        for (let copy of copies) {
+          this.elaborateInstance(copy, m, k, E, C, M);
+        }
+        return;
+      }
+    }
     let nodeId = m.createNodeId(`inst_${d.instanceName}`);
     let R = [];
     let moduleScope = k?.getModuleScope(d.moduleName);
@@ -465,20 +477,7 @@ export class Elaborator {
         }
       }
       if (Oe) {
-        let Ke = 1;
-        let yn = "";
-        if (portConnection.expression.kind === "Identifier") {
-          yn = portConnection.expression.name;
-          Ke = k?.getModuleScope(E?.name ?? "")?.resolve(yn)?.bitWidth ?? 1;
-        } else {
-          if (
-            portConnection.expression.kind === "BitSelect" ||
-            portConnection.expression.kind === "PartSelect"
-          ) {
-            yn = baseIdentifier(portConnection.expression)?.name ?? "";
-            Ke = k?.getModuleScope(E?.name ?? "")?.resolve(yn)?.bitWidth ?? 1;
-          }
-        }
+        let Ke = m.lvalueWidth(portConnection.expression);
         let Se = {
           id: portName,
           name: portName,
@@ -486,18 +485,7 @@ export class Elaborator {
           bitWidth: Ke,
         };
         R.push(Se);
-        m.registerSignalSource(portName, {
-          nodeId: nodeId,
-          pinId: portName,
-          bitWidth: Ke,
-        });
-        if (yn) {
-          m.registerSignalSource(yn, {
-            nodeId: nodeId,
-            pinId: portName,
-            bitWidth: Ke,
-          });
-        }
+        m.assignLvalue(portConnection.expression, { nodeId: nodeId, pinId: portName, bitWidth: Ke }, false);
       } else {
         let expression = m.elaborateExpression(portConnection.expression);
         let yn = {
@@ -523,6 +511,51 @@ export class Elaborator {
       span: d.span,
     };
     m.nodes.push(Qe);
+  }
+  // `leaf u [3:0] (.a(bus))`: one instance per index; a connection as wide as all copies together is sliced,
+  // the rightmost index taking the least significant bits.
+  expandInstanceArray(d, m, k, E) {
+    let msb = m.constValue(d.instanceDims[0].msb);
+    let lsb = m.constValue(d.instanceDims[0].lsb);
+    let count = msb === undefined || lsb === undefined ? undefined : Math.abs(msb - lsb) + 1;
+    if (!count || count > 256) {
+      return undefined;
+    }
+    let portWidths = new Map();
+    let ports = [];
+    let moduleScope = k?.getModuleScope(d.moduleName);
+    for (let symbol of moduleScope?.getSymbols() ?? []) {
+      if (symbol.kind === "port" && symbol.direction) {
+        portWidths.set(symbol.name, symbol.bitWidth ?? 1);
+        ports.push(symbol.name);
+      }
+    }
+    let step = msb >= lsb ? -1 : 1;
+    let copies = [];
+    for (let index = msb; ; index += step) {
+      let position = Math.abs(index - lsb);
+      let portConnections = d.portConnections.map((connection, order) => {
+        let portName = connection.portName.startsWith("__pos_") ? ports[order] : connection.portName;
+        let expr = connection.expression;
+        let width = portWidths.get(portName);
+        if (!expr || !width || expr.kind !== "Identifier" || m.arrays.has(expr.name)) {
+          return connection;
+        }
+        let total = m.signalWidth(expr.name);
+        if (total !== width * count) {
+          return connection;
+        }
+        let high = m.indexAtOffset(expr.name, position * width + width - 1);
+        let low = m.indexAtOffset(expr.name, position * width);
+        let literal = (value) => ({ kind: "NumberLiteral", raw: String(value), value, span: expr.span });
+        return { ...connection, expression: { kind: "PartSelect", target: expr, msb: literal(high), lsb: literal(low), span: expr.span } };
+      });
+      copies.push({ ...d, instanceDims: undefined, instanceName: `${d.instanceName}[${index}]`, portConnections });
+      if (index === lsb) {
+        break;
+      }
+    }
+    return copies;
   }
   isSignalConsumedInModule(d, m, k) {
     if (!m) {

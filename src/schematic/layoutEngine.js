@@ -381,7 +381,7 @@ export class LayoutEngine {
     let M = d.label.length + (d.bitWidth > 1 ? ` [${d.bitWidth - 1}:0]`.length : 0);
     let v =
       d.type === "SUBMODULE"
-        ? 130
+        ? Math.max(130, 16 + d.label.length * 7.2, ...this.submodulePinWidths(d))
         : d.type === "CONCAT"
           ? 44
           : d.type === "REPLICATION"
@@ -401,6 +401,11 @@ export class LayoutEngine {
       width: v,
       height: R,
     };
+  }
+  // Room for the longest input name and output name side by side.
+  submodulePinWidths(d) {
+    let longest = (direction) => Math.max(0, ...d.pins.filter((pin) => pin.direction === direction).map((pin) => String(pin.name).length));
+    return [40 + (longest("in") + longest("out")) * 6.5];
   }
   computePinOffsets(d, m, k) {
     let E = cellFor(d.type);

@@ -1,22 +1,94 @@
-import { baseIdentifier } from "../lint/rtlCheckers.js";
+// Loops with more iterations than this, or blocks that would unroll into more copies, are not drawn.
+const MAX_LOOP_ITERATIONS = 256;
+const MAX_UNROLLED_COPIES = 4096;
 
 export class AlwaysElaborator {
   exprElaborator;
   isSequentialContext = false;
   constructor(exprElaborator) {
     this.exprElaborator = exprElaborator;
+    exprElaborator.alwaysElaborator = this;
   }
-  selectCoversWholeSignal(d, m) {
-    let k = this.exprElaborator.scope?.resolve(m)?.bitWidth ?? 1;
-    return d.kind === "BitSelect"
-      ? k === 1
-      : d.kind === "PartSelect"
-        ? d.msb.kind !== "NumberLiteral" || d.lsb.kind !== "NumberLiteral"
-          ? false
-          : Math.abs(d.msb.value - d.lsb.value) + 1 === k
-        : false;
+  // Replaces `for` and `repeat` loops with constant bounds by one copy of the body per iteration.
+  unrollStatement(statement, budget = { copies: 0 }) {
+    if (!statement || typeof statement !== "object") {
+      return statement;
+    }
+    switch (statement.kind) {
+      case "BlockStatement":
+        return { ...statement, statements: statement.statements.map((child) => this.unrollStatement(child, budget)) };
+      case "IfStatement":
+        return {
+          ...statement,
+          thenBranch: this.unrollStatement(statement.thenBranch, budget),
+          elseBranch: statement.elseBranch ? this.unrollStatement(statement.elseBranch, budget) : statement.elseBranch,
+        };
+      case "CaseStatement":
+        return { ...statement, items: statement.items.map((item) => ({ ...item, statement: this.unrollStatement(item.statement, budget) })) };
+      case "BlockingAssign":
+      case "NonBlockingAssign": {
+        let elements = this.exprElaborator.expandArrayAssign(statement);
+        return elements ? { kind: "BlockStatement", statements: elements, span: statement.span } : statement;
+      }
+      case "LoopStatement": {
+        let plan = this.loopIterations(statement);
+        if (!plan || budget.copies + plan.values.length > MAX_UNROLLED_COPIES) {
+          return statement;
+        }
+        budget.copies += plan.values.length;
+        let copies = plan.values.map((value) =>
+          this.unrollStatement(plan.name ? this.exprElaborator.substitute(statement.body, plan.name, value) : statement.body, budget),
+        );
+        return { kind: "BlockStatement", statements: copies, span: statement.span };
+      }
+      default:
+        return statement;
+    }
+  }
+  // The values a loop variable takes ({ name, values }), or { values } for `repeat (n)`; undefined if not constant.
+  loopIterations(statement) {
+    let elaborator = this.exprElaborator;
+    if (statement.loopKind === "repeat") {
+      let count = elaborator.constValue(statement.countExpr);
+      return count !== undefined && count >= 0 && count <= MAX_LOOP_ITERATIONS ? { values: Array.from({ length: count }, (_, k) => k) } : undefined;
+    }
+    let init = statement.initExpr;
+    let step = statement.stepExpr;
+    if (
+      statement.loopKind !== "for" ||
+      init?.kind !== "BinaryExpression" ||
+      init.operator !== "=" ||
+      init.left?.kind !== "Identifier" ||
+      step?.kind !== "BinaryExpression" ||
+      step.operator !== "=" ||
+      step.left?.kind !== "Identifier" ||
+      step.left.name !== init.left.name
+    ) {
+      return undefined;
+    }
+    let name = init.left.name;
+    let value = elaborator.constValue(init.right);
+    let values = [];
+    for (; value !== undefined && values.length <= MAX_LOOP_ITERATIONS;) {
+      let env = new Map([[name, value]]);
+      let condition = elaborator.constValue(statement.condition, env);
+      if (condition === undefined) {
+        return undefined;
+      }
+      if (!condition) {
+        return { name, values };
+      }
+      values.push(value);
+      let next = elaborator.constValue(step.right, env);
+      if (next === value) {
+        return undefined;
+      }
+      value = next;
+    }
+    return undefined;
   }
   elaborateAlways(d) {
+    d = { ...d, statement: this.unrollStatement(d.statement) };
     if (d.sensitivities.length === 0) {
       let m = d.delayExpr
         ? "Delay-controlled 'always' is a simulation construct (e.g. a clock generator) and is not synthesizable"
@@ -30,38 +102,64 @@ export class AlwaysElaborator {
       }
       return;
     }
-    if (d.isSequential) {
-      this.elaborateSequential(d);
-    } else {
-      this.elaborateCombinational(d.statement);
+    this.inAlways = true;
+    try {
+      if (d.isSequential) {
+        this.elaborateSequential(d);
+      } else {
+        let memories = this.startMemoryWrites(this.findAllAssignedVars(d.statement));
+        this.elaborateCombinational(d.statement);
+        for (let memory of memories) {
+          this.exprElaborator.addMemoryWritePort(memory, undefined);
+        }
+      }
+    } finally {
+      this.inAlways = false;
     }
+  }
+  // Memories written in a block start with their write enable low.
+  startMemoryWrites(assignedVars) {
+    let memories = [...assignedVars].filter((name) => name.endsWith("#we")).map((name) => name.slice(0, -3));
+    for (let memory of memories) {
+      this.exprElaborator.registerSignalSource(`${memory}#we`, this.exprElaborator.createConstantSource(0, 1));
+    }
+    return memories;
+  }
+  // What a signal holds on a path that does not assign it: the register output in a clocked block,
+  // nothing for a memory's write address or data (the other path's value is kept).
+  constantValue(source) {
+    let node = source && this.exprElaborator.nodes.find((candidate) => candidate.id === source.nodeId);
+    return node?.type === "CONSTANT" ? node.attributes?.value : undefined;
+  }
+  holdValue(name, span) {
+    if (name.endsWith("#we")) {
+      return this.exprElaborator.createConstantSource(0, 1);
+    }
+    if (this.exprElaborator.isMemoryPort(name)) {
+      return undefined;
+    }
+    return this.isSequentialContext ? this.exprElaborator.elaborateExpression({ kind: "Identifier", name, span }) : undefined;
   }
   elaborateCombinational(d) {
     switch (d.kind) {
       case "BlockingAssign":
       case "NonBlockingAssign": {
         let expression = this.exprElaborator.elaborateExpression(d.rhs);
-        let k = "";
-        if (d.lhs.kind === "Identifier") {
-          k = d.lhs.name;
-        } else if (
-          (d.lhs.kind === "BitSelect" || d.lhs.kind === "PartSelect") &&
-          ((k = baseIdentifier(d.lhs)?.name ?? ""), k && !this.selectCoversWholeSignal(d.lhs, k))
-        ) {
-          this.exprElaborator.registerSignalSource(
-            k,
-            this.exprElaborator.createUnsupportedSource(
-              k,
-              `Partial assignment to '${k}[...]' cannot be merged bit-by-bit yet`,
-            ),
-          );
-          break;
-        }
-        if (k) {
-          this.exprElaborator.registerSignalSource(k, expression);
-        }
+        this.exprElaborator.assignLvalue(d.lhs, expression, this.isSequentialContext);
         break;
       }
+      case "LoopStatement":
+        for (let name of this.findAllAssignedVars(d.body)) {
+          this.exprElaborator.registerSignalSource(
+            name,
+            this.exprElaborator.createUnsupportedSource(
+              "loop",
+              `This ${d.loopKind ?? "loop"} loop is not drawn: its bounds are not constant or it runs more than ${MAX_LOOP_ITERATIONS} times`,
+              this.exprElaborator.signalWidth(name),
+            ),
+          );
+        }
+        break;
       case "BlockStatement":
         for (let statement of d.statements) {
           this.elaborateCombinational(statement);
@@ -117,12 +215,13 @@ export class AlwaysElaborator {
       let value5 = C.get(allAssignedVar5);
       let value6 = M.get(allAssignedVar5);
       let value7 = E.get(allAssignedVar5);
-      if (!this.isSequentialContext && value5 && !value6 && !value7) {
+      let memoryPort = this.exprElaborator.isMemoryPort(allAssignedVar5);
+      if (!memoryPort && !this.isSequentialContext && value5 && !value6 && !value7) {
         let latch = this.createLatch(expression, value5, d.span);
         this.exprElaborator.registerSignalSource(allAssignedVar5, latch);
         continue;
       }
-      if (!this.isSequentialContext && value6 && !value5 && !value7) {
+      if (!memoryPort && !this.isSequentialContext && value6 && !value5 && !value7) {
         let nodeId = this.exprElaborator.createNodeId("gate_not");
         let te = {
           id: nodeId,
@@ -157,17 +256,21 @@ export class AlwaysElaborator {
         continue;
       }
       let Q = value7;
-      if (!Q && this.isSequentialContext) {
-        Q = this.exprElaborator.elaborateExpression({
-          kind: "Identifier",
-          name: allAssignedVar5,
-          span: d.span,
-        });
+      if (!Q && (this.isSequentialContext || memoryPort)) {
+        Q = this.holdValue(allAssignedVar5, d.span);
       }
       let Re = value5 ?? Q;
       let Qe = value6 ?? Q;
       if (Re && Qe && Re.nodeId === Qe.nodeId && Re.pinId === Qe.pinId) {
         this.exprElaborator.registerSignalSource(allAssignedVar5, Re);
+      } else if (memoryPort && (!Re || !Qe)) {
+        this.exprElaborator.registerSignalSource(allAssignedVar5, Re ?? Qe);
+      } else if (allAssignedVar5.endsWith("#we") && this.constantValue(Qe) === 0) {
+        // Write enable: `cond` when the then-branch writes, `cond & en` when it writes under a nested condition.
+        this.exprElaborator.registerSignalSource(
+          allAssignedVar5,
+          this.constantValue(Re) === 1 ? expression : this.exprElaborator.createBinaryNode("GATE_AND", "&", expression, Re, 1, d.span),
+        );
       } else if (Re || Qe) {
         let maxValue = Math.max(Re?.bitWidth ?? 1, Qe?.bitWidth ?? 1);
         let te = Re ?? this.exprElaborator.createConstantSource(0, maxValue);
@@ -178,7 +281,8 @@ export class AlwaysElaborator {
     }
   }
   elaborateCaseStatement(d) {
-    if (d.caseType !== "case") {
+    let wildcard = d.caseType === "casez" ? "?zZ" : d.caseType === "casex" || d.inside ? "?zZxX" : "";
+    if (d.caseType !== "case" && d.caseType !== "casez" && d.caseType !== "casex") {
       let le = new Set();
       for (let item of d.items) {
         for (let Oe of this.findAllAssignedVars(item.statement)) {
@@ -239,6 +343,15 @@ export class AlwaysElaborator {
       if (le.patterns.length > 0) {
         let _e = [];
         for (let pattern of le.patterns) {
+          let masked = wildcard ? wildcardPattern(pattern, wildcard) : undefined;
+          if (masked) {
+            // `casez`/`casex` item: compare only the bits that are not wildcards.
+            let mask = this.exprElaborator.createConstantSource(masked.mask, masked.width, `${masked.width}'b${masked.maskBits}`);
+            let bits = this.exprElaborator.createBinaryNode("GATE_AND", "&", expression, mask, Math.max(expression.bitWidth, masked.width), pattern.span);
+            let value = this.exprElaborator.createConstantSource(masked.value, masked.width, `${masked.width}'b${masked.valueBits}`);
+            _e.push(this.exprElaborator.createBinaryNode("COMPARE_EQ", "==", bits, value, 1, pattern.span));
+            continue;
+          }
           let expression2 = this.exprElaborator.elaborateExpression(pattern);
           let nodeId = this.exprElaborator.createNodeId("cmp_eq");
           let jn = {
@@ -317,17 +430,14 @@ export class AlwaysElaborator {
         }
       }
     }
-    let Qe = Re.size >= pow;
+    let Qe = !wildcard && Re.size >= pow;
     for (let le of k) {
       let te = M.has(le) || E.has(le) || Qe;
       let Oe = [];
+      let memoryPort = this.exprElaborator.isMemoryPort(le);
       let _e = M.get(le) ?? E.get(le);
-      if (!_e && this.isSequentialContext) {
-        _e = this.exprElaborator.elaborateExpression({
-          kind: "Identifier",
-          name: le,
-          span: d.span,
-        });
+      if (!_e && (this.isSequentialContext || memoryPort)) {
+        _e = this.holdValue(le, d.span);
         te = true;
       }
       for (let Ke = v.length - 1; Ke >= 0; Ke--) {
@@ -343,7 +453,7 @@ export class AlwaysElaborator {
         }
       }
       if (_e) {
-        if (!te && Oe.length > 0 && !this.isSequentialContext) {
+        if (!te && !memoryPort && Oe.length > 0 && !this.isSequentialContext) {
           let combineWithOr = this.combineWithOr(Oe);
           let latch = this.createLatch(combineWithOr, _e, d.span);
           this.exprElaborator.registerSignalSource(le, latch);
@@ -429,23 +539,47 @@ export class AlwaysElaborator {
       }
     };
     this.isSequentialContext = true;
+    let savedOverrides = this.exprElaborator.readOverrides;
     try {
+      let registerOutputs = new Map();
+      this.startMemoryWrites(allAssignedVars);
       for (let allAssignedVar3 of allAssignedVars) {
+        if (this.exprElaborator.isMemoryPort(allAssignedVar3)) {
+          continue;
+        }
         let expression = this.exprElaborator.elaborateExpression({
           kind: "Identifier",
           name: allAssignedVar3,
           span: d.span,
         });
         this.exprElaborator.registerSignalSource(allAssignedVar3, expression);
+        registerOutputs.set(allAssignedVar3, expression);
       }
+      // Nonblocking assignments update at the end of the time step: every read in the block sees the old value.
+      let nonBlocking = this.findAllAssignedVars(d.statement, ["NonBlockingAssign"]);
+      this.exprElaborator.readOverrides = new Map([...nonBlocking].map((name) => [name, registerOutputs.get(name)]).filter(([, source]) => source));
       le(d.statement);
     } finally {
       this.isSequentialContext = false;
+      this.exprElaborator.readOverrides = savedOverrides;
     }
+    let clockSource = J ? this.exprElaborator.elaborateExpression({ kind: "Identifier", name: J, span: d.span }) : undefined;
     for (let allAssignedVar4 of allAssignedVars) {
+      if (allAssignedVar4.endsWith("#we")) {
+        let memory = allAssignedVar4.slice(0, -3);
+        for (let port of ["we", "waddr", "wdata"]) {
+          let value = Re.get(`${memory}#${port}`);
+          if (value) {
+            this.exprElaborator.registerSignalSource(`${memory}#${port}`, value);
+          }
+        }
+        this.exprElaborator.addMemoryWritePort(memory, clockSource);
+      }
+      if (this.exprElaborator.isMemoryPort(allAssignedVar4)) {
+        continue;
+      }
       let value3 = Re.get(allAssignedVar4);
-      let Ke =
-        this.exprElaborator.scope?.resolve(allAssignedVar4)?.bitWidth ?? value3?.bitWidth ?? 1;
+      let Ke = this.exprElaborator.signalWidth(allAssignedVar4) ?? value3?.bitWidth ?? 1;
       let yn =
         value3 ??
         this.exprElaborator.signalOutputs.get(allAssignedVar4) ??
@@ -681,20 +815,31 @@ export class AlwaysElaborator {
     }
     return m;
   }
-  findAllAssignedVars(d) {
+  lvalueNames(lhs) {
+    if (lhs?.kind === "Concatenation") {
+      return lhs.elements.flatMap((element) => this.lvalueNames(element));
+    }
+    let memory = this.exprElaborator.memoryWriteTarget(lhs);
+    if (memory) {
+      return [`${memory}#we`, `${memory}#waddr`, `${memory}#wdata`];
+    }
+    let name = this.exprElaborator.lvalueTarget(lhs)?.name;
+    return name ? [name] : [];
+  }
+  findAllAssignedVars(d, kinds) {
     let m = new Set();
     let k = (E) => {
       switch (E.kind) {
         case "BlockingAssign":
         case "NonBlockingAssign":
-          if (E.lhs.kind === "Identifier") {
-            m.add(E.lhs.name);
-          } else if (E.lhs.kind === "BitSelect" || E.lhs.kind === "PartSelect") {
-            let C = baseIdentifier(E.lhs);
-            if (C) {
-              m.add(C.name);
+          if (!kinds || kinds.includes(E.kind)) {
+            for (let name of this.lvalueNames(E.lhs)) {
+              m.add(name);
             }
           }
+          break;
+        case "LoopStatement":
+          k(E.body);
           break;
         case "BlockStatement":
           for (let statement of E.statements) {
@@ -723,14 +868,8 @@ export class AlwaysElaborator {
     let m = new Map();
     let k = (E) => {
       if (E.kind === "BlockingAssign" || E.kind === "NonBlockingAssign") {
-        let C = "";
-        if (E.lhs.kind === "Identifier") {
-          C = E.lhs.name;
-        } else {
-          if (E.lhs.kind === "BitSelect" || E.lhs.kind === "PartSelect") {
-            C = baseIdentifier(E.lhs)?.name ?? "";
-          }
-        }
+        let target = this.exprElaborator.lvalueTarget(E.lhs);
+        let C = target && !target.unknown && target.width === undefined ? target.name : "";
         if (C) {
           if (E.rhs.kind === "Identifier") {
             m.set(C, E.rhs.name);
@@ -749,4 +888,36 @@ export class AlwaysElaborator {
     k(d);
     return m;
   }
+}
+
+// A based literal with wildcard digits (`4'b1?0z`) as { mask, value, width, maskBits }; undefined otherwise.
+function wildcardPattern(pattern, wildcards) {
+  if (pattern?.kind !== "NumberLiteral") {
+    return undefined;
+  }
+  let match = /^(\d*)\s*'[sS]?([bBoOhH])\s*([0-9a-fA-FxXzZ?_]+)$/.exec(pattern.raw ?? "");
+  if (!match) {
+    return undefined;
+  }
+  let perDigit = { b: 1, o: 3, h: 4 }[match[2].toLowerCase()];
+  let maskBits = "";
+  let valueBits = "";
+  for (let digit of match[3].replace(/_/g, "")) {
+    if (wildcards.includes(digit)) {
+      maskBits += "0".repeat(perDigit);
+      valueBits += "0".repeat(perDigit);
+    } else if (/[xXzZ]/.test(digit)) {
+      return undefined;
+    } else {
+      maskBits += "1".repeat(perDigit);
+      valueBits += parseInt(digit, 16).toString(2).padStart(perDigit, "0");
+    }
+  }
+  let width = match[1] ? Number(match[1]) : maskBits.length;
+  maskBits = maskBits.slice(-width).padStart(width, "1");
+  valueBits = valueBits.slice(-width).padStart(width, "0");
+  if (!maskBits.includes("0") || width > 52) {
+    return undefined;
+  }
+  return { mask: parseInt(maskBits, 2), value: parseInt(valueBits, 2), width, maskBits, valueBits };
 }

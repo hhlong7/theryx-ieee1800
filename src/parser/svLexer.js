@@ -521,8 +521,9 @@ export class SvLexer extends Lexer {
           end++;
         }
         let word = body.slice(index, end);
-        let previous = body[index - 1];
-        result += values.has(word) && previous !== "`" ? values.get(word) : word;
+        // `name is a macro call, but a``name pastes the argument `name` onto what comes before it.
+        let macroCall = body[index - 1] === "`" && body[index - 2] !== "`";
+        result += values.has(word) && !macroCall ? values.get(word) : word;
         index = end;
         continue;
       }
@@ -710,21 +711,7 @@ export class SvLexer extends Lexer {
     }
     return "";
   }
-  skipSpaceBeforeBase() {
-    let at = this.index;
-    for (; this.source[at] === " " || this.source[at] === "\t";) {
-      at++;
-    }
-    if (at !== this.index && this.source[at] === "'") {
-      let base = this.source[at + 1];
-      if (base === "s" || base === "S") {
-        base = this.source[at + 2];
-      }
-      if (base && this.isBaseSpecifier(base)) {
-        this.skipInlineWhitespace();
-      }
-    }
-  }
+
   createToken(type, text, line, column) {
     if (this.callSite) {
       return { type, text, span: { ...this.callSite, fromMacro: true } };

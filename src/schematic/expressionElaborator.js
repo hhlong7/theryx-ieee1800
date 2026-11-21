@@ -4,7 +4,7 @@ const MAX_DRAWN_REPLICATION = 4096;
 // Unpacked arrays with more elements than this are memories: their accesses are not drawn element by element.
 const MAX_ARRAY_ELEMENTS = 1024;
 // A variable index into an array this size or smaller is drawn as a mux over its elements.
-const MAX_MUXED_ARRAY_READ = 16;
+const MAX_MUXED_ARRAY_READ = 32;
 const MAX_INLINE_DEPTH = 8;
 
 export class ExpressionElaborator {
@@ -116,7 +116,7 @@ export class ExpressionElaborator {
     visit(items);
   }
   signalWidth(name) {
-    let local = this.localWidths?.get(name);
+    let local = this.localWidths?.get(name) ?? this.memberWidths?.get(name);
     if (local !== undefined) {
       return local;
     }
@@ -366,6 +366,14 @@ export class ExpressionElaborator {
     if (!target?.name) {
       return;
     }
+    if (target.dynamic && !this.isMemory(target.name)) {
+      let total = this.signalWidth(target.name);
+      let base = this.writeBase(target.name, total, sequential);
+      let merged = this.dynamicSplice(base, target.dynamic, source, total, lhs.span);
+      this.registerSignalSource(target.name, merged);
+      this.tagNet(merged, target.name);
+      return;
+    }
     if (target.unknown) {
       this.registerSignalSource(
         target.name,
@@ -379,6 +387,10 @@ export class ExpressionElaborator {
       return;
     }
     if (target.width === undefined) {
+      if (target.name.includes(".")) {
+        this.memberWidths ??= new Map();
+        this.memberWidths.set(target.name, Math.max(this.memberWidths.get(target.name) ?? 1, source.bitWidth));
+      }
       this.registerSignalSource(target.name, source);
       this.tagNet(source, target.name);
       return;
@@ -396,6 +408,32 @@ export class ExpressionElaborator {
     let merged = this.splice(base, target.offset, target.width, source, total, lhs.span);
     this.registerSignalSource(target.name, merged);
     this.tagNet(merged, target.name);
+  }
+  // `v[k +: W] = x` with a run-time k: (v & ~(MASK << k)) | ((x & MASK) << k).
+  dynamicSplice(base, { index, base: offset, width }, value, total, span) {
+    let shift = this.elaborateExpression(index);
+    if (offset) {
+      shift = this.createBinaryNode("ADD", "+", shift, this.createConstantSource(offset, shift.bitWidth, String(offset)), Math.max(shift.bitWidth, 8), span);
+    }
+    let maskLabel = width <= 52 ? `${total}'h${(Math.pow(2, width) - 1).toString(16)}` : `${width} ones`;
+    let mask = this.createConstantSource(width <= 52 ? Math.pow(2, width) - 1 : 0, total, maskLabel);
+    let shiftedMask = this.createBinaryNode("SHIFT_LEFT", "<<", mask, shift, total, span);
+    let nodeId = this.createNodeId("gate_not");
+    this.nodes.push({
+      id: nodeId,
+      type: "GATE_NOT",
+      label: "~",
+      pins: [
+        { id: "in", name: "A", direction: "in", bitWidth: total },
+        { id: "out", name: "Y", direction: "out", bitWidth: total },
+      ],
+      bitWidth: total,
+      span,
+    });
+    this.connect(shiftedMask.nodeId, shiftedMask.pinId, nodeId, "in", total);
+    let kept = this.createBinaryNode("GATE_AND", "&", base, { nodeId, pinId: "out", bitWidth: total }, total, span);
+    let placed = this.createBinaryNode("SHIFT_LEFT", "<<", this.fitWidth(this.fitWidth(value, width), total), shift, total, span);
+    return this.createBinaryNode("GATE_OR", "|", kept, placed, total, span);
   }
   finishContinuousSlices() {
     for (let [name, slices] of this.continuousSlices ?? []) {
@@ -615,6 +653,8 @@ export class ExpressionElaborator {
     switch (lhs?.kind) {
       case "Identifier":
         return { name: lhs.name };
+      case "OpaqueExpression":
+        return this.memberPath(lhs.text) ? { name: lhs.text } : undefined;
       case "BitSelect":
       case "PartSelect": {
         if (lhs.kind === "BitSelect") {
@@ -625,28 +665,40 @@ export class ExpressionElaborator {
           }
         }
         let inner = this.lvalueTarget(lhs.target);
-        if (!inner?.name || inner.unknown || inner.width !== undefined) {
+        if (!inner?.name || inner.unknown) {
           return inner?.name ? { name: inner.name, unknown: true } : undefined;
         }
-        let total = this.signalWidth(inner.name);
+        // A select of a slice (`v[c][r]` on a packed 2-D vector) counts from the slice's low bit.
+        let nested = inner.width !== undefined;
+        let total = nested ? inner.width : this.signalWidth(inner.name);
+        let position = (index) => (nested ? index : this.bitOffset(inner.name, index));
         let low;
         let width;
+        let dynamicIndex;
         if (lhs.kind === "BitSelect") {
           let index = this.constValue(lhs.index);
-          low = index === undefined ? undefined : this.bitOffset(inner.name, index);
+          low = index === undefined ? undefined : position(index);
           width = 1;
+          dynamicIndex = lhs.index;
         } else {
           let msb = this.constValue(lhs.msb);
           let lsb = this.constValue(lhs.lsb);
           if (msb !== undefined && lsb !== undefined) {
-            low = Math.min(this.bitOffset(inner.name, msb), this.bitOffset(inner.name, lsb));
+            low = Math.min(position(msb), position(lsb));
             width = Math.abs(msb - lsb) + 1;
+          } else {
+            width = lhs.svWidth ?? this.constValue(lhs.indexedWidth);
+            dynamicIndex = lhs.lsb;
           }
+        }
+        if (low === undefined && dynamicIndex && width && (nested || this.indexAtOffset(inner.name, 0) === 0)) {
+          // Index known only at run time: drawn as a shifted-mask merge (see assignLvalue).
+          return { name: inner.name, unknown: true, dynamic: { index: dynamicIndex, base: inner.offset ?? 0, width } };
         }
         if (low === undefined || low < 0 || low + width > total) {
           return { name: inner.name, unknown: true };
         }
-        return { name: inner.name, offset: low, width };
+        return { name: inner.name, offset: (inner.offset ?? 0) + low, width };
       }
       default:
         return undefined;
@@ -742,6 +794,94 @@ export class ExpressionElaborator {
       result = this.createMuxNode(match, elementSource, result, d.span);
     }
     return result;
+  }
+  // `req.aw.valid` on a signal whose struct type is not known here (a type parameter): { root, text }.
+  memberPath(text) {
+    let match = /^([A-Za-z_][A-Za-z0-9_$]*)((?:\.[A-Za-z_][A-Za-z0-9_$]*)+)$/.exec(text ?? "");
+    if (match && this.scope?.resolve(match[1]) && this.scope.resolve(match[1]).kind !== "interface") {
+      return { root: match[1], text };
+    }
+    // A struct declared in a generate block: `gen_x[0].req_d.ar.size` has the root `gen_x[0].req_d`.
+    let parts = /^[A-Za-z_][A-Za-z0-9_$\[\].]*$/.test(text ?? "") ? text.split(".") : [];
+    for (let count = parts.length - 1; count >= 2; count--) {
+      let root = parts.slice(0, count).join(".");
+      if (this.localWidths?.has(root) || this.scope?.resolve(root) || this.signalOutputs.has(root)) {
+        return { root, text };
+      }
+    }
+    return undefined;
+  }
+  // A member of an input port is a labelled tap on the port; any other member is a signal of its own.
+  readMember({ root, text }, span) {
+    let whole = this.signalOutputs.get(root);
+    let wholeDriven = whole && !this.placeholderNodes.has(whole.nodeId);
+    if (!this.signalOutputs.has(text) && (this.isInputPort(root) || wholeDriven)) {
+      let port = whole ?? this.elaborateIdentifier({ kind: "Identifier", name: root, span });
+      return this.memberTap(port, text.slice(root.length + 1), root, span, text);
+    }
+    return this.elaborateIdentifier({ kind: "Identifier", name: text, span });
+  }
+  memberTap(port, member, rootName, span, fullName) {
+    {
+      let width = (fullName && this.memberWidths?.get(fullName)) ?? 1;
+      let nodeId = this.createNodeId("member");
+      this.nodes.push({
+        id: nodeId,
+        type: "SPLIT",
+        label: `.${member}`,
+        pins: [
+          { id: "in", name: "IN", direction: "in", bitWidth: port.bitWidth },
+          { id: "out", name: "OUT", direction: "out", bitWidth: width },
+        ],
+        bitWidth: width,
+        span,
+        attributes: { member },
+      });
+      this.connect(port.nodeId, port.pinId, nodeId, "in", port.bitWidth, rootName);
+      let source = { nodeId, pinId: "out", bitWidth: width };
+      if (fullName) {
+        this.sourceSignalNames.set(`${nodeId}:out`, fullName);
+      }
+      return source;
+    }
+  }
+  // Members written in this module (`resp_o.ready = ...`) are joined into one struct block driving the signal.
+  finishMemberWrites() {
+    let byRoot = new Map();
+    for (let [name, source] of this.signalOutputs) {
+      let member = name.includes(".") ? this.memberPath(name) : undefined;
+      if (member && !this.placeholderNodes.has(source.nodeId)) {
+        let list = byRoot.get(member.root) ?? [];
+        list.push({ member: name.slice(member.root.length + 1), source });
+        byRoot.set(member.root, list);
+      }
+    }
+    for (let [root, members] of byRoot) {
+      let current = this.signalOutputs.get(root);
+      let base = current && !this.placeholderNodes.has(current.nodeId) ? current : undefined;
+      let width = this.signalWidth(root);
+      let nodeId = this.createNodeId("struct");
+      this.nodes.push({
+        id: nodeId,
+        type: "SUBMODULE",
+        label: `struct ${root}`,
+        pins: [
+          ...(base ? [{ id: "base", name: "rest", direction: "in", bitWidth: base.bitWidth }] : []),
+          ...members.map(({ member, source }) => ({ id: `m_${member}`, name: member, direction: "in", bitWidth: source.bitWidth })),
+          { id: "out", name: root, direction: "out", bitWidth: width },
+        ],
+        bitWidth: width,
+        attributes: { moduleName: "", struct: true },
+      });
+      if (base) {
+        this.connect(base.nodeId, base.pinId, nodeId, "base", base.bitWidth);
+      }
+      for (let { member, source } of members) {
+        this.connect(source.nodeId, source.pinId, nodeId, `m_${member}`, source.bitWidth);
+        this.signalOutputs.delete(`${root}.${member}`);
+      }
+      this.registerSignalSource(root, { nodeId, pinId: "out", bitWidth: width });
+    }
   }
   isInputPort(name) {
     let symbol = this.scope?.resolve(name);
@@ -1011,7 +1151,7 @@ export class ExpressionElaborator {
         let k = this.constValue(d.msb);
         let E = this.constValue(d.lsb);
         if (k === undefined || E === undefined) {
-          return this.dynamicSelect(expression2, d.lsb, d.svWidth ?? 1, d.span);
+          return this.dynamicSelect(expression2, d.lsb, d.svWidth ?? this.constValue(d.indexedWidth) ?? 1, d.span);
         }
         let C = Math.abs(k - E) + 1;
         let nodeId2 = this.createNodeId("split");
@@ -1109,11 +1249,20 @@ export class ExpressionElaborator {
             `Function call '${d.name}' cannot be elaborated into a circuit`,
           )
         );
-      case "OpaqueExpression":
+      case "OpaqueExpression": {
+        let member = this.memberPath(d.text);
+        if (member) {
+          return this.readMember(member, d.span);
+        }
+        if (d.inner && /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)*$/.test(d.text ?? "")) {
+          // `reqs[i].aw_valid`: a member of a selected element.
+          return this.memberTap(this.elaborateExpression(d.inner), d.text, undefined, d.span);
+        }
         return this.createUnsupportedSource(
           d.text ?? "expression",
           `'${d.text ?? "expression"}' is a SystemVerilog construct that is not drawn in the schematic`,
         );
+      }
       default:
         return this.createUnsupportedSource(d.kind ?? "expression", `'${d.kind}' is not drawn in the schematic`);
     }
@@ -1276,14 +1425,10 @@ export class ExpressionElaborator {
   elaborateBinary(d) {
     let expression = this.elaborateExpression(d.left);
     let expression2 = this.elaborateExpression(d.right);
-    if (
-      (d.operator === "&&" || d.operator === "||") &&
-      (expression.bitWidth > 1 || expression2.bitWidth > 1)
-    ) {
-      return this.createUnsupportedSource(
-        d.operator,
-        `Logical '${d.operator}' on multi-bit operands needs reduction logic`,
-      );
+    if (d.operator === "&&" || d.operator === "||") {
+      // A multi-bit operand of a logical operator is true when any bit is set.
+      expression = this.reduceOr(expression, d.span);
+      expression2 = this.reduceOr(expression2, d.span);
     }
     let includes = ["==", "!=", "===", "!==", "<", ">", "<=", ">=", "&&", "||"].includes(
       d.operator,
@@ -1358,9 +1503,35 @@ export class ExpressionElaborator {
       bitWidth: M,
     };
   }
+  // `|x` for a multi-bit value, the value itself for one bit.
+  reduceOr(source, span) {
+    if (source.bitWidth <= 1) {
+      return source;
+    }
+    let nodeId = this.createNodeId("reduction_or");
+    this.nodes.push({
+      id: nodeId,
+      type: "REDUCTION_OR",
+      label: "|",
+      pins: [
+        { id: "in", name: "A", direction: "in", bitWidth: source.bitWidth },
+        { id: "out", name: "Y", direction: "out", bitWidth: 1 },
+      ],
+      bitWidth: 1,
+      span,
+    });
+    this.connect(source.nodeId, source.pinId, nodeId, "in", source.bitWidth);
+    return { nodeId, pinId: "out", bitWidth: 1 };
+  }
   elaborateUnary(d) {
     let expression = this.elaborateExpression(d.argument);
     let bitWidth = expression.bitWidth;
+    if (d.operator === "+") {
+      return expression;
+    }
+    if (d.operator === "-") {
+      return this.createBinaryNode("SUB", "-", this.createConstantSource(0, bitWidth, "0"), expression, bitWidth, d.span);
+    }
     let includes = ["&", "~&", "|", "~|", "^", "~^", "^~"].includes(d.operator);
     let C;
     let M;
@@ -1389,14 +1560,9 @@ export class ExpressionElaborator {
           C = "UNSUPPORTED";
       }
     } else if (d.operator === "!") {
-      if (bitWidth > 1) {
-        return this.createUnsupportedSource(
-          "!",
-          "Logical '!' on a multi-bit operand needs reduction logic",
-        );
-      }
       M = 1;
-      C = "GATE_NOT";
+      // `!x` on a vector is true when no bit is set.
+      C = bitWidth > 1 ? "REDUCTION_NOR" : "GATE_NOT";
     } else {
       if (d.operator === "~") {
         M = bitWidth;
@@ -1606,9 +1772,17 @@ export class ExpressionElaborator {
         return "SUB";
       case "*":
         return "MUL";
+      case "/":
+        return "DIV";
+      case "%":
+        return "MOD";
+      case "**":
+        return "POW";
       case "==":
+      case "===":
         return "COMPARE_EQ";
       case "!=":
+      case "!==":
         return "COMPARE_NE";
       case "<":
         return "COMPARE_LT";

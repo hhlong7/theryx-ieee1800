@@ -354,3 +354,55 @@ describe("Windows line endings", () => {
     expect(stringErrors('module m;\r\n  string s = "abc\r\n;\r\nendmodule\r\n')).toEqual(["SYNTAX-STRING"]);
   });
 });
+
+describe("third-party Verilog idioms", () => {
+  let errorsOf = (text, name = "inline.v") => analyzeText(text, name).errors.filter((diagnostic) => diagnostic.severity === "error");
+
+  it("parses the PicoRV32-style constructs without errors", () => {
+    let text = `
+      \`define assert(cond) if (!(cond)) $finish
+      module pico #(parameter integer W = 32, parameter [31:0] M = 32'h ffff_ffff) (input clk, input [31:0] a, output reg [7:0] y);
+        localparam integer N = 4;
+        (* keep *) reg [31:0] r;
+        always @(posedge clk) begin
+          (* parallel_case *)
+          case (a[1:0]) 2'b00: y <= a[8 +: 8]; default: y <= a[31 -: 8]; endcase
+          \`assert(a != 0);
+        end
+        generate if (W == 32) begin : g32
+          sub u (.a(a[0]), .y());
+        end else begin : g64
+          sub u (.a(a[1]), .y());
+        end endgenerate
+      endmodule
+      module sub (input a, output y); assign y = a; endmodule`;
+    expect(errorsOf(text)).toEqual([]);
+  });
+
+  it("draws Verilog generate blocks, taking the right generate-if branch", () => {
+    let { entry, resolver } = analyzeText(
+      `module leaf (input a, output y); assign y = ~a; endmodule
+       module top #(parameter W = 2) (input [1:0] a, output [1:0] y);
+         genvar i;
+         generate for (i = 0; i < W; i = i + 1) begin : g
+           if (i == 0) begin : even leaf u (.a(a[i]), .y(y[i])); end
+           else begin : odd assign y[i] = a[i]; end
+         end endgenerate
+       endmodule`,
+      "inline.v",
+    );
+    let module = entry.ast.modules.find((candidate) => candidate.name === "top");
+    let graph = new Elaborator(resolver).elaborateModule(module, entry.symbolTable);
+    expect(graph.nodes.filter((node) => node.type === "SUBMODULE")).toHaveLength(1);
+    expect(graph.nodes.filter((node) => node.type === "UNSUPPORTED")).toHaveLength(0);
+  });
+
+  it("substitutes a macro argument pasted after ``", () => {
+    let text = `
+      \`define REQ(name, ch) logic name\`\`_\`\`ch\`\`_valid;
+      module mp; \`REQ(slv, aw) endmodule`;
+    let { entry } = analyzeText(text);
+    let names = entry.ast.modules[0].items.flatMap((item) => (item.identifiers ?? []).map((identifier) => identifier.name));
+    expect(names).toEqual(["slv_aw_valid"]);
+  });
+});

@@ -129,6 +129,12 @@ function* walkGenerateItems(O) {
   } else {
     if (O.kind === "GenerateLoopStatement") {
       yield* walkGenerateItems(O.body);
+    } else if (O.kind === "GenerateIfStatement") {
+      for (let branch of [O.thenBlock, O.elseBlock]) {
+        if (branch) {
+          yield* walkGenerateItems(branch);
+        }
+      }
     }
   }
 }

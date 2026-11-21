@@ -103,7 +103,7 @@ function generateLocalNames(body) {
 }
 
 // One iteration of a generate loop: the genvar becomes a number, local names and instances get the iteration prefix.
-function unrollGenerateBody(body, genvar, value, prefix) {
+export function unrollGenerateBody(body, genvar, value, prefix) {
   let locals = generateLocalNames(body);
   let rename = (name) => (locals.has(name) ? prefix + name : name);
   // Instances inside a nested generate loop get their full prefix when that loop unrolls.
@@ -1204,7 +1204,12 @@ class Lowering {
           return undefined;
         }
         let named = current.namedImports.get(expr.name);
-        pkg = named?.lookupExported?.(expr.name, "functionDecls") ? named : current.wildcardImports.find((candidate) => candidate.lookupExported?.(expr.name, "functionDecls"));
+        // Inside a package, its own functions are visible without an import.
+        pkg = current.functionDecls?.has(expr.name)
+          ? current
+          : named?.lookupExported?.(expr.name, "functionDecls")
+            ? named
+            : current.wildcardImports.find((candidate) => candidate.lookupExported?.(expr.name, "functionDecls"));
       }
     }
     let item = pkg?.lookupExported?.(expr.name, "functionDecls");

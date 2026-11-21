@@ -162,9 +162,9 @@ export class SvgRenderer {
     } else if (d.type === "SPLIT") {
       svgBody = `
         <line x1="0" y1="18" x2="8" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-        <polygon points="8,8 36,4 36,32 8,28" fill="var(--bg-panel, #252526)" stroke="currentColor" stroke-width="1.8"/>
-        <text x="22" y="22" font-size="8.5" font-family="monospace" font-weight="bold" text-anchor="middle" fill="currentColor">${escapeXml(d.label)}</text>
-        <line x1="36" y1="18" x2="44" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <polygon points="8,8 ${(d.width ?? 44) - 8},4 ${(d.width ?? 44) - 8},32 8,28" fill="var(--bg-panel, #252526)" stroke="currentColor" stroke-width="1.8"/>
+        <text x="${(d.width ?? 44) / 2}" y="22" font-size="8.5" font-family="monospace" font-weight="bold" text-anchor="middle" fill="currentColor">${escapeXml(d.label)}</text>
+        <line x1="${(d.width ?? 44) - 8}" y1="18" x2="${d.width ?? 44}" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
       `;
     } else if (d.type === "PORT_IN") {
       let _e = d.width - 10;

@@ -170,4 +170,43 @@ describe("schematic elaboration", () => {
     let wire = g.graph.connections.find((candidate) => candidate.sourceNodeId === dff.id && candidate.netName);
     expect(wire.netName).toBe("q");
   });
+  it("draws members of type-parameter structs as taps and a struct block", () => {
+    let g = schematic(
+      `module st #(parameter type req_t = logic) (input req_t [1:0] r_i, input req_t q_i, output logic v_o, output req_t o);
+         assign v_o = r_i[1].aw_valid;
+         always_comb begin o = '0; o.aw_valid = q_i.w_valid; end
+       endmodule`,
+      "st",
+    );
+    expect(g.ofType("UNSUPPORTED")).toHaveLength(0);
+    expect(g.output("v_o").label).toBe(".aw_valid");
+    let struct = g.output("o");
+    expect(struct.label).toBe("struct o");
+    expect(g.driver(struct, "m_aw_valid").label).toBe(".w_valid");
+    expect(g.driver(struct, "base").type).toBe("CONSTANT");
+  });
+
+  it("draws logical operators on vectors, unary minus and run-time indexed writes", () => {
+    let g = schematic(
+      `module lg (input logic [3:0] a, b, input logic [1:0] k, output logic y, output logic [3:0] n, q);
+         assign y = a && !b;
+         assign n = -a;
+         always_comb begin q = a; q[k] = 1'b0; end
+       endmodule`,
+      "lg",
+    );
+    expect(g.ofType("UNSUPPORTED")).toHaveLength(0);
+    expect(g.ofType("REDUCTION_OR").length).toBeGreaterThan(0);
+    expect(g.output("n").type).toBe("SUB");
+  });
+
+  it("maps division, modulo and power to their own cells", () => {
+    let g = schematic(
+      `module dm (input logic [7:0] a, b, output logic [7:0] x, y, z);
+         assign x = a / b; assign y = a % b; assign z = a ** 2;
+       endmodule`,
+      "dm",
+    );
+    expect([g.output("x").type, g.output("y").type, g.output("z").type]).toEqual(["DIV", "MOD", "POW"]);
+  });
 });

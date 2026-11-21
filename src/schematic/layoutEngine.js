@@ -235,11 +235,14 @@ export class LayoutEngine {
   }
   layoutInWorker(d, m) {
     let k = ++this.requestCounter;
+    // Large real designs (thousands of cells) need longer than the base budget; allow ~6ms per node, up to a minute.
+    let nodes = m?.children?.length ?? 0;
+    let timeout = Math.max(this.timeoutMs, Math.min(60e3, nodes * 6));
     return new Promise((E, C) => {
       let M = setTimeout(() => {
         this.pending.delete(k);
-        C(new Error(`ELK layout timed out after ${this.timeoutMs}ms`));
-      }, this.timeoutMs);
+        C(new Error(`ELK layout timed out after ${timeout}ms`));
+      }, timeout);
       this.pending.set(k, {
         resolve: E,
         reject: C,
@@ -386,6 +389,8 @@ export class LayoutEngine {
           ? 44
           : d.type === "REPLICATION"
             ? 52
+            : d.type === "SPLIT"
+              ? Math.max(m.width, 24 + d.label.length * 5.4)
             : d.type === "SIGNAL_UNUSED"
               ? Math.max(65, 30 + M * 7.5)
               : d.type === "PORT_INTERMEDIATE" || d.type === "PORT_IN" || d.type === "PORT_OUT"

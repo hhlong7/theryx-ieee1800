@@ -83,6 +83,9 @@ export class Parser {
       let delimitedList = this.parseDelimitedList({
         parseItem: () => {
           this.match("parameter", "localparam");
+          // Verilog-2001 parameter types: `parameter integer N = 4`, `parameter signed [7:0] K = -1`.
+          this.match("integer", "real", "realtime", "time");
+          this.match("signed", "unsigned");
           if (this.check("[")) {
             this.parseRange();
           }
@@ -199,6 +202,16 @@ export class Parser {
     if (this.match("generate")) {
       return this.parseGenerateBlock();
     }
+    if (this.match("MacroReference")) {
+      this.skipMacroArguments();
+      this.match(";");
+      return null;
+    }
+    if (this.check("for") || this.check("if")) {
+      // Verilog-2005: a generate loop or conditional may appear without `generate ... endgenerate`.
+      let statement = this.parseGenerateStatement();
+      return { kind: "GenerateBlock", items: [], statements: [statement], span: statement.span };
+    }
     if (this.match("genvar")) {
       return this.parseGenvarDeclaration();
     }
@@ -231,6 +244,7 @@ export class Parser {
     let prevToken = this.previous();
     let m = prevToken.type === "localparam";
     let k;
+    this.match("integer", "real", "realtime", "time");
     this.match("signed", "unsigned");
     if (this.check("[")) {
       k = this.parseRange();
@@ -503,6 +517,9 @@ export class Parser {
       this.advance();
       return this.parseGenerateBlockStatement();
     }
+    if (this.match("if")) {
+      return this.parseGenerateIf();
+    }
     if (this.match("for", "while", "repeat", "forever")) {
       let prevToken = this.previous();
       let text = prevToken.text;
@@ -545,10 +562,32 @@ export class Parser {
     }
     return this.parseStatement();
   }
+  // `if (COND) <generate item> [else <generate item>]` at generate level: its branches hold module items.
+  parseGenerateIf() {
+    let keyword = this.previous();
+    this.consume("(", "Expected '(' after 'if'");
+    let condition = this.parseExpression();
+    this.consume(")", "Expected ')' after if condition");
+    let thenBlock = this.parseGenerateBody();
+    let elseBlock;
+    if (this.match("else")) {
+      elseBlock = this.match("if") ? this.parseGenerateIf() : this.parseGenerateBody();
+    }
+    return {
+      kind: "GenerateIfStatement",
+      condition,
+      thenBlock,
+      elseBlock,
+      span: this.combineSpans(keyword.span, (elseBlock ?? thenBlock ?? keyword).span),
+    };
+  }
   parseGenerateBody() {
     if (this.check("begin")) {
       this.advance();
       return this.parseGenerateBlockStatement();
+    }
+    if (this.checkAny(STATEMENT_START_KEYWORDS)) {
+      return this.parseGenerateStatement();
     }
     let moduleItem = this.parseModuleItem();
     return moduleItem
@@ -983,6 +1022,13 @@ export class Parser {
     }
   }
   parseStatementInner() {
+    if (this.check("MacroReference") && !["=", "<=", "["].includes(this.peekNext().type)) {
+      // `` `assert(x); ``: .v files do not expand macros, so a macro used as a statement is opaque.
+      let span = this.advance().span;
+      this.skipMacroArguments();
+      this.match(";");
+      return { kind: "EmptyStatement", span };
+    }
     if (this.match("begin")) {
       let span = this.previous().span;
       let k;
@@ -1616,7 +1662,33 @@ export class Parser {
     let k = d;
     for (;;) {
       let expression = this.parseExpression();
-      if (this.match(":")) {
+      if (this.match("+:", "-:")) {
+        // `v[base +: W]` (IEEE 1364-2001 indexed part-select) as an ordinary part-select of W bits.
+        let up = this.previous().type === "+:";
+        let width = this.parseExpression();
+        let token = this.consume("]", "Expected ']' after indexed part-select");
+        let span = this.combineSpans(m, token ? token.span : width.span);
+        let number = (value) => ({ kind: "NumberLiteral", raw: String(value), value, span });
+        let other =
+          expression.kind === "NumberLiteral" && width.kind === "NumberLiteral"
+            ? number(up ? expression.value + width.value - 1 : expression.value - width.value + 1)
+            : {
+                kind: "BinaryExpression",
+                operator: up ? "+" : "-",
+                left: expression,
+                right: { kind: "BinaryExpression", operator: "-", left: width, right: number(1), span },
+                span,
+              };
+        k = {
+          kind: "PartSelect",
+          target: k,
+          msb: up ? other : expression,
+          lsb: up ? expression : other,
+          svWidth: width.kind === "NumberLiteral" ? width.value : undefined,
+          indexedWidth: width,
+          span,
+        };
+      } else if (this.match(":")) {
         let expression2 = this.parseExpression();
         let token = this.consume("]", "Expected ']' after part-select");
         k = {
@@ -1640,9 +1712,25 @@ export class Parser {
       }
     }
   }
+  // Skips a macro's `( ... )` argument list, nested parentheses included.
+  skipMacroArguments() {
+    if (!this.check("(")) {
+      return;
+    }
+    let depth = 0;
+    for (; !this.isAtEnd();) {
+      let type = this.advance().type;
+      if (type === "(") {
+        depth++;
+      } else if (type === ")" && --depth === 0) {
+        return;
+      }
+    }
+  }
   parsePrimary() {
     if (this.match("MacroReference")) {
       let prevToken = this.previous();
+      this.skipMacroArguments();
       let k = {
         kind: "Identifier",
         name: prevToken.text,

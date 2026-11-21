@@ -145,6 +145,17 @@ export class Lexer {
         this.skipInactiveContent();
         continue;
       }
+      if (this.peek() === "(" && this.peekNext() === "*" && d[d.length - 1]?.type !== "@" && this.attributeAhead()) {
+        // `(* parallel_case *)` and other IEEE 1364-2001 attributes carry no meaning for analysis.
+        for (this.advance(), this.advance(); !this.isAtEnd() && !(this.peek() === "*" && this.peekNext() === ")");) {
+          this.advance();
+        }
+        if (!this.isAtEnd()) {
+          this.advance();
+          this.advance();
+        }
+        continue;
+      }
       let nextToken = this.nextToken();
       d.push(nextToken);
     }
@@ -390,6 +401,11 @@ export class Lexer {
       return this.createToken("!==", "!==", line, column);
     }
     switch (token + peekNext) {
+      case "+:":
+      case "-:":
+        this.advance();
+        this.advance();
+        return this.createToken(token + peekNext, token + peekNext, line, column);
       case "<<":
         this.advance();
         this.advance();
@@ -599,11 +615,16 @@ export class Lexer {
     for (; !this.isAtEnd() && (this.isDigit(this.peek()) || this.peek() === "_");) {
       k += this.advance();
     }
+    if (k) {
+      // `32 'h ff` and `32'h ff`: IEEE 1364 allows spaces around the base.
+      this.skipSpaceBeforeBase();
+    }
     if (!this.isAtEnd() && this.peek() === "'") {
       for (
         k += this.advance(),
           !this.isAtEnd() && (this.peek() === "s" || this.peek() === "S") && (k += this.advance()),
-          this.isAtEnd() || (k += this.advance());
+          this.isAtEnd() || (k += this.advance()),
+          this.skipInlineWhitespace();
         !this.isAtEnd() &&
         (this.isHexDigit(this.peek()) ||
           this.peek() === "_" ||
@@ -617,6 +638,29 @@ export class Lexer {
       }
     }
     return this.createToken("NumberLiteral", k, d, m);
+  }
+  // `(*` opens an attribute unless it is the `@(*)` / `@ ( * )` sensitivity list.
+  attributeAhead() {
+    let next = this.index + 2;
+    for (; next < this.source.length && /\s/.test(this.source[next]);) {
+      next++;
+    }
+    return this.source[next] !== ")";
+  }
+  skipSpaceBeforeBase() {
+    let at = this.index;
+    for (; this.source[at] === " " || this.source[at] === "\t";) {
+      at++;
+    }
+    if (at !== this.index && this.source[at] === "'") {
+      let base = this.source[at + 1];
+      if (base === "s" || base === "S") {
+        base = this.source[at + 2];
+      }
+      if (base && this.isBaseSpecifier(base)) {
+        this.skipInlineWhitespace();
+      }
+    }
   }
   isAlphaOrUnderscore(d) {
     return (d >= "a" && d <= "z") || (d >= "A" && d <= "Z") || d === "_";

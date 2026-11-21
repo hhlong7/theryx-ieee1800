@@ -597,6 +597,111 @@ const CELL_LIBRARY = {
       <line x1="39" y1="20" x2="50" y2="20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
     `,
   },
+  DIV: {
+    type: "DIV",
+    width: 50,
+    height: 40,
+    pins: [
+      {
+        id: "in0",
+        name: "A",
+        side: "WEST",
+        x: 0,
+        y: 12,
+      },
+      {
+        id: "in1",
+        name: "B",
+        side: "WEST",
+        x: 0,
+        y: 28,
+      },
+      {
+        id: "out",
+        name: "Y",
+        side: "EAST",
+        x: 50,
+        y: 20,
+      },
+    ],
+    svgBody: `
+      <line x1="0" y1="12" x2="11" y2="12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="0" y1="28" x2="11" y2="28" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="25" cy="20" r="14" fill="var(--bg-panel, #252526)" stroke="currentColor" stroke-width="2"/>
+      <text x="25" y="25" font-size="14" font-family="sans-serif" font-weight="bold" text-anchor="middle" fill="currentColor">\xF7</text>
+      <line x1="39" y1="20" x2="50" y2="20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    `,
+  },
+  MOD: {
+    type: "MOD",
+    width: 50,
+    height: 40,
+    pins: [
+      {
+        id: "in0",
+        name: "A",
+        side: "WEST",
+        x: 0,
+        y: 12,
+      },
+      {
+        id: "in1",
+        name: "B",
+        side: "WEST",
+        x: 0,
+        y: 28,
+      },
+      {
+        id: "out",
+        name: "Y",
+        side: "EAST",
+        x: 50,
+        y: 20,
+      },
+    ],
+    svgBody: `
+      <line x1="0" y1="12" x2="11" y2="12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="0" y1="28" x2="11" y2="28" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="25" cy="20" r="14" fill="var(--bg-panel, #252526)" stroke="currentColor" stroke-width="2"/>
+      <text x="25" y="25" font-size="13" font-family="sans-serif" font-weight="bold" text-anchor="middle" fill="currentColor">%</text>
+      <line x1="39" y1="20" x2="50" y2="20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    `,
+  },
+  POW: {
+    type: "POW",
+    width: 50,
+    height: 40,
+    pins: [
+      {
+        id: "in0",
+        name: "A",
+        side: "WEST",
+        x: 0,
+        y: 12,
+      },
+      {
+        id: "in1",
+        name: "B",
+        side: "WEST",
+        x: 0,
+        y: 28,
+      },
+      {
+        id: "out",
+        name: "Y",
+        side: "EAST",
+        x: 50,
+        y: 20,
+      },
+    ],
+    svgBody: `
+      <line x1="0" y1="12" x2="11" y2="12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="0" y1="28" x2="11" y2="28" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="25" cy="20" r="14" fill="var(--bg-panel, #252526)" stroke="currentColor" stroke-width="2"/>
+      <text x="25" y="25" font-size="12" font-family="sans-serif" font-weight="bold" text-anchor="middle" fill="currentColor">**</text>
+      <line x1="39" y1="20" x2="50" y2="20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    `,
+  },
   COMPARE_EQ: {
     type: "COMPARE_EQ",
     width: 52,

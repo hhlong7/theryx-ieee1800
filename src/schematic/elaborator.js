@@ -2,6 +2,7 @@ import { ModuleResolver } from "../workspace/moduleResolver.js";
 import { ExpressionElaborator } from "./expressionElaborator.js";
 import { AlwaysElaborator } from "./alwaysElaborator.js";
 import { baseIdentifier } from "../lint/rtlCheckers.js";
+import { unrollGenerateBody } from "../analysis/svLowering.js";
 
 export class Elaborator {
   moduleResolver;
@@ -11,8 +12,12 @@ export class Elaborator {
   elaborateModule(d, m) {
     let moduleScope = m.getModuleScope(d.name);
     let expressionElaborator = new ExpressionElaborator(moduleScope);
-    expressionElaborator.registerDeclarations([...(d.svImportedFunctions ?? []), ...d.items]);
     let alwaysElaborator = new AlwaysElaborator(expressionElaborator);
+    if (d.items.some((item) => item.kind === "GenerateBlock")) {
+      // .v modules keep their generate constructs (SystemVerilog ones were unrolled during lowering).
+      d = { ...d, items: this.flattenGenerate(d.items, expressionElaborator, alwaysElaborator) };
+    }
+    expressionElaborator.registerDeclarations([...(d.svImportedFunctions ?? []), ...d.items]);
     let M = new Set();
     let v = new Set();
     for (let item of d.items) {
@@ -55,6 +60,7 @@ export class Elaborator {
       }
     }
     expressionElaborator.finishContinuousSlices();
+    expressionElaborator.finishMemberWrites();
     expressionElaborator.resolvePlaceholders();
     this.connectOutputs(d, expressionElaborator, m);
     expressionElaborator.pruneDeadNodes();
@@ -126,6 +132,7 @@ export class Elaborator {
       }
     }
     expressionElaborator.finishContinuousSlices();
+    expressionElaborator.finishMemberWrites();
     expressionElaborator.resolvePlaceholders();
     let J = new Set();
     if (d.kind === "ContinuousAssign") {
@@ -556,6 +563,65 @@ export class Elaborator {
       }
     }
     return copies;
+  }
+  flattenGenerate(items, exprs, always) {
+    let out = [];
+    for (let item of items) {
+      if (item.kind === "GenerateBlock") {
+        out.push(...this.flattenGenerate(item.items, exprs, always));
+        for (let statement of item.statements ?? []) {
+          out.push(...this.flattenGenerateStatement(statement, exprs, always));
+        }
+      } else {
+        out.push(item);
+      }
+    }
+    return out;
+  }
+  // One generate construct as plain module items: constant `if` picks a branch, constant `for` unrolls with
+  // `label[k].` name prefixes. Anything that is not constant draws nothing.
+  flattenGenerateStatement(statement, exprs, always) {
+    switch (statement?.kind) {
+      case "GenerateBlockStatement": {
+        let items = this.flattenGenerate(statement.items ?? [], exprs, always);
+        for (let child of statement.statements ?? []) {
+          items.push(...this.flattenGenerateStatement(child, exprs, always));
+        }
+        for (let item of items) {
+          if (item.kind === "NetDeclaration" && !exprs.scope?.resolve(item.identifiers?.[0]?.name)) {
+            // Generate-local nets are not in the module's symbol table; remember their widths.
+            let msb = exprs.constValue(item.range?.msb);
+            let lsb = exprs.constValue(item.range?.lsb);
+            exprs.localWidths ??= new Map();
+            for (let identifier of item.identifiers ?? []) {
+              exprs.localWidths.set(identifier.name, msb === undefined || lsb === undefined ? 1 : Math.abs(msb - lsb) + 1);
+            }
+          }
+        }
+        return items;
+      }
+      case "GenerateIfStatement": {
+        let condition = exprs.constValue(statement.condition);
+        let chosen = condition === undefined ? undefined : condition ? statement.thenBlock : statement.elseBlock;
+        return chosen ? this.flattenGenerateStatement(chosen, exprs, always) : [];
+      }
+      case "GenerateLoopStatement": {
+        let plan = always.loopIterations(statement);
+        if (!plan?.name) {
+          return [];
+        }
+        let label = statement.body?.name ?? "genblk";
+        return plan.values.flatMap((value) =>
+          this.flattenGenerateStatement(
+            unrollGenerateBody(statement.body, plan.name, value, `${statement.svGeneratePrefix ?? ""}${label}[${value}].`),
+            exprs,
+            always,
+          ),
+        );
+      }
+      default:
+        return [];
+    }
   }
   isSignalConsumedInModule(d, m, k) {
     if (!m) {
